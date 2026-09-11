@@ -104,24 +104,10 @@ return {
         map("n", "<leader>cl", vim.lsp.codelens.run, bo)
         map("n", "<leader>sh", vim.lsp.buf.signature_help, bo)
         map("n", "<leader>rn", vim.lsp.buf.rename, bo)
-        map("n", "<leader>f", vim.lsp.buf.format, bo)
         map("n", "<leader>ca", vim.lsp.buf.code_action, bo)
 
         map("n", "<leader>ws", function()
           require("metals").hover_worksheet()
-        end, bo)
-
-        -- all workspace diagnostics
-        map("n", "<leader>aa", vim.diagnostic.setqflist, bo)
-
-        -- all workspace errors
-        map("n", "<leader>ae", function()
-          vim.diagnostic.setqflist({ severity = "E" })
-        end, bo)
-
-        -- all workspace warnings
-        map("n", "<leader>aw", function()
-          vim.diagnostic.setqflist({ severity = "W" })
         end, bo)
 
         -- buffer diagnostics only

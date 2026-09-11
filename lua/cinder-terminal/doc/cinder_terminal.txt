@@ -1,0 +1,190 @@
+*cinder_terminal.txt*  Persistent floating terminal workspace
+
+==============================================================================
+CONTENTS                                                     *cinder-terminal*
+
+    1. Introduction                         |cinder-terminal-introduction|
+    2. Setup                                |cinder-terminal-setup|
+    3. API                                  |cinder-terminal-api|
+    4. Highlights                           |cinder-terminal-highlights|
+    5. Themes                               |cinder-terminal-themes|
+    6. Commands                             |cinder-terminal-commands|
+
+==============================================================================
+INTRODUCTION                                     *cinder-terminal-introduction*
+
+cinder-terminal.nvim provides a floating terminal workspace with persistent
+terminal sessions, a session sidebar, and commands for switching sessions.
+It uses snacks.nvim for the floating windows.
+
+The plugin does not install keymaps. Add the mappings you prefer in your
+configuration:
+
+>
+    local terminal = require("cinder_terminal")
+    vim.keymap.set({ "n", "t" }, "<C-/>", terminal.toggle, {
+      desc = "Terminal Workspace",
+    })
+<
+
+==============================================================================
+SETUP                                                  *cinder-terminal-setup*
+
+Call |cinder_terminal.setup()| from your plugin manager's `opts` or `config`:
+
+>
+    return {
+      dir = "~/src/cinder-terminal.nvim",
+      main = "cinder_terminal",
+      dependencies = { "folke/snacks.nvim" },
+      opts = {
+        width = 0.88,
+        height = 0.82,
+        sidebar_width = 32,
+      },
+    }
+<
+
+Available options:
+
+                                                            *cinder-terminal-options*
+    cwd             string or function returning a directory. Defaults to the
+                    LazyVim root when available, then `vim.fs.root()`.
+    root_markers    markers used by `vim.fs.root`; set to false to disable
+                    project-root lookup.
+    shell           shell command passed to `termopen()`.
+    width           floating workspace width. Defaults to 0.88.
+    height          floating workspace height. Defaults to 0.82.
+    sidebar_width   session sidebar width. Defaults to 32.
+    sidebar_title   sidebar title.
+    title           floating workspace title.
+    border          Snacks border style. Defaults to "rounded".
+    highlights      a table of user overrides, documented below.
+
+==============================================================================
+API                                                          *cinder-terminal-api*
+
+The module returned by `require("cinder_terminal")` exposes:
+
+                                                            *cinder_terminal.setup()*
+    `setup(opts?)` initializes the plugin once and returns the module. Call it
+    during startup; subsequent calls are ignored.
+
+                                                            *cinder_terminal.toggle()*
+    Show the workspace and focus its terminal, or close it when visible.
+
+                                                            *cinder_terminal.open()*
+    Open a new session. An optional directory can be passed.
+
+                                                            *cinder_terminal.focus()*
+    Show the workspace and focus the terminal without entering insert mode.
+
+                                                            *cinder_terminal.focus_sidebar()*
+    Show the workspace and focus the session sidebar.
+
+                                                            *cinder_terminal.select()*
+    Select a session using `vim.ui.select()`.
+
+                                                            *cinder_terminal.add()*
+    Prompt for a directory and open a session there.
+
+                                                            *cinder_terminal.copy_current()*
+    Open another session using the current terminal process directory.
+
+                                                            *cinder_terminal.close_workspace()*
+    Hide the floating workspace while keeping sessions alive.
+
+                                                            *cinder_terminal.close_current()*
+    Close the current session.
+
+                                                            *cinder_terminal.restart_current()*
+    Close and recreate the current session.
+
+                                                            *cinder_terminal.next()*
+    Focus the next session.
+
+                                                            *cinder_terminal.prev()*
+    Focus the previous session.
+
+                                                            *cinder_terminal.refresh()*
+    Refresh the sidebar and workspace title.
+
+                                                            *cinder_terminal.register_theme()*
+    `register_theme(name, callback)` registers one colorscheme adapter. The
+    callback receives the public `CinderTerminal.*` highlight groups.
+
+                                                            *cinder_terminal.refresh_terminal_theme()*
+    `refresh_terminal_theme()` reapplies defaults, overrides, and the adapter
+    for the active colorscheme.
+
+==============================================================================
+HIGHLIGHTS                                             *cinder-terminal-highlights*
+
+The public groups are available as `require("cinder_terminal").highlights`:
+
+>
+    local terminal = require("cinder_terminal")
+    vim.api.nvim_set_hl(0, terminal.highlights.normal, {
+      bg = "#232a2e",
+    })
+<
+
+The group names use the `CinderTerminal.*` namespace:
+
+    normal      terminal content and unused cells
+    sidebar     session list background
+    selected    selected session row
+    border      outer border and internal separator
+    title       workspace title
+
+Each group starts with a standard Neovim group (`NormalFloat`, `CursorLine`,
+`FloatBorder`, or `FloatTitle`). User overrides are applied on every theme
+refresh, then the active theme adapter is applied on top. For a
+plugin-manager configuration, use:
+
+>
+    opts = {
+      highlights = {
+        overrides = {
+          normal = { bg = "#232a2e" },
+          sidebar = { bg = "#343f44" },
+        },
+      },
+    }
+<
+
+==============================================================================
+THEMES                                                   *cinder-terminal-themes*
+
+Register a colorscheme adapter with |cinder_terminal.register_theme()|:
+
+>
+    local terminal = require("cinder_terminal")
+    terminal.register_theme("everforest", function(hl)
+      vim.api.nvim_set_hl(0, hl.normal, { bg = "#232a2e" })
+    end)
+<
+
+The adapter receives the public highlight groups and is selected by
+`vim.g.colors_name`. The refresh order is:
+
+    theme callback > overrides > default
+
+`refresh_terminal_theme()` runs once during `setup()` and again whenever the
+`ColorScheme` event fires. Registering an adapter after setup also refreshes
+immediately when it matches the current colorscheme.
+
+==============================================================================
+COMMANDS                                               *cinder-terminal-commands*
+
+The setup API defines these commands:
+
+    :CinderTerminalToggle       toggle the workspace
+    :CinderTerminalFocus        focus the terminal
+    :CinderTerminalFocusSidebar focus the session sidebar
+    :CinderTerminalClose        close the workspace
+    :CinderTerminalNew [dir]    create a session
+    :CinderTerminalNext         switch to the next session
+    :CinderTerminalPrev         switch to the previous session
+
+ vim:tw=78:ts=8:ft=help:norl:

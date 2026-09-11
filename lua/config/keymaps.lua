@@ -13,7 +13,7 @@ pcall(vim.keymap.del, "n", "<leader>l")
 map("n", "<leader>ll", "<cmd>Lazy<cr>", { desc = "Lazy" })
 
 local function terminal()
-  return require("config.terminal")
+  return require("cinder_terminal")
 end
 
 map({ "n", "t" }, "<C-/>", function()

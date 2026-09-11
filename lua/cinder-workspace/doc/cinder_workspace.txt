@@ -1,0 +1,120 @@
+*cinder_workspace.txt*  Aggregate project directories with cinder-workspace
+
+==============================================================================
+Contents                                                         *cinder-workspace*
+
+    1. Overview                         |cinder-workspace-overview|
+    2. Commands                         |cinder-workspace-commands|
+    3. Lua API                          |cinder-workspace-api|
+    4. Explorer integration             |cinder-workspace-explorer|
+    5. Environment                      |cinder-workspace-environment|
+
+==============================================================================
+1. Overview                                               *cinder-workspace-overview*
+
+The plugin creates a persistent directory whose children are directory
+symlinks to independent projects:
+
+    <workspace-base>/rtl-sim/
+    |- .cinder-workspace
+    |- rtl       -> /path/to/project/rtl
+    `- simulator -> /path/to/project/simulator
+
+The links on disk are the workspace state. Attach and detach take effect
+immediately. Closing Neovim does not remove the workspace directory or source
+directories.
+
+The first version supports POSIX directory symlinks. It does not change the
+current working directory, manage tabs or buffers, or delete source content.
+
+==============================================================================
+2. Commands                                               *cinder-workspace-commands*
+
+                                                        *:CinderWorkspace*
+:CinderWorkspace new {name}
+        Create an empty workspace under the configured workspace base and
+        select it.
+
+:CinderWorkspace open {root}
+        Validate an existing workspace directory and select it.
+
+:CinderWorkspace attach {directory} [name]
+        Add a directory symlink to the selected workspace. The name defaults
+        to the source directory basename.
+
+:CinderWorkspace detach {name}
+        Remove one symlink. The source directory is never removed.
+
+:CinderWorkspace close
+        Clear the selected workspace. The directory remains on disk.
+
+:CinderWorkspace list
+        Display the selected workspace and its links.
+
+:CinderWorkspace export {path}
+        Write a JSON snapshot of the selected workspace.
+
+:CinderWorkspace import {path}
+        Create and select a workspace from a JSON snapshot. An existing root
+        is never overwritten.
+
+==============================================================================
+3. Lua API                                                   *cinder-workspace-api*
+
+    local workspace = require("cinder_workspace")
+
+    workspace.new("rtl-sim")
+    workspace.attach("~/project/rtl", { name = "rtl" })
+    workspace.current()
+    workspace.export("~/workspaces/rtl-sim.json")
+
+The module functions are:
+
+    setup()                         Register the command.
+    new(name)                       Create and select a workspace.
+    open(root)                      Validate and select an existing workspace.
+    current()                      Return a fresh workspace snapshot or nil.
+    attach(path, opts?)             Create a symlink in the current workspace.
+    detach(name)                    Remove a symlink from the current workspace.
+    close()                         Clear the current selection.
+    export(path)                    Write a JSON snapshot.
+    import(path)                    Create a workspace from a JSON snapshot.
+
+On failure, operations return nil, err, where err is an actionable string.
+The core module does not call |vim.notify()|; command and UI entry points do.
+
+==============================================================================
+4. Explorer integration                                   *cinder-workspace-explorer*
+
+The configuration wrapper |config-explorer| selects the explorer root without
+changing cwd:
+
+    <Leader>e  workspace root, or LazyVim project root without a workspace
+    <Leader>E  workspace root, or current cwd without a workspace
+
+Both mappings call:
+
+    require("config.explorer").open("project")
+    require("config.explorer").open("cwd")
+
+The wrapper passes the selected root to Snacks.explorer and leaves explorer
+navigation, buffers and sessions to their existing plugins.
+
+==============================================================================
+5. Environment                                           *cinder-workspace-environment*
+
+For |cinder-workspace.new()| and |cinder-workspace.import()|:
+
+    CINDER_WORKSPACE
+        Non-empty absolute path to an existing accessible directory. An
+        invalid value is an error and does not fall back to HOME.
+
+    HOME
+        Used only when CINDER_WORKSPACE is unset or empty. It must also be an
+        existing accessible absolute directory.
+
+The plugin never creates the base directory or uses a temporary directory as
+a fallback.
+
+==============================================================================
+vim:tw=78:ts=8:sw=4:et:ft=help:norl:
