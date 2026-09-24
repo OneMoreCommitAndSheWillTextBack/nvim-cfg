@@ -1,0 +1,3 @@
+1. 如果设置了 CINDER_WORSPACE 环境变量，那么在创建json文件的同时，在这里也打一个list,可以用来全局追踪workspace,防止workspace散落在各个地方。然后呢允许export 不含有参数，直接保存在CINDER_WORSPACE制定的文件夹里面。
+
+2.将默认工作目录的路径由HOME改变为CINDER_WORSPACE 环境变量指定的文件夹里面，而不是HOME目录，如果这个环境变量为空，那么就默认变为/tmp/.cinder-workspace目录
