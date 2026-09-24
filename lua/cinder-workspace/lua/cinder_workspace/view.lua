@@ -237,7 +237,7 @@ local function read_folders(root)
   return folders
 end
 
-local function resolve_folder(path, alias)
+local function resolve_target(path, alias)
   local normalized, normalize_err = normalize_path(path)
   if not normalized then
     return nil, normalize_err
@@ -250,19 +250,24 @@ local function resolve_folder(path, alias)
 
   local real_path, real_err = uv.fs_realpath(normalized)
   if not real_path then
-    return fail("绑定目录不存在或不可访问：%s（%s）", normalized, tostring(real_err))
+    return fail("绑定目标不存在或不可访问：%s（%s）", normalized, tostring(real_err))
   end
   local stat, stat_err = uv.fs_stat(real_path)
   if not stat then
-    return fail("无法检查绑定目录 %s：%s", real_path, tostring(stat_err))
+    return fail("无法检查绑定目标 %s：%s", real_path, tostring(stat_err))
   end
-  if stat.type ~= "directory" then
-    return fail("绑定目标必须是目录：%s", normalized)
+  if stat.type == "directory" then
+    if not uv.fs_access(real_path, "R") or not uv.fs_access(real_path, "X") then
+      return fail("绑定目录当前不可访问：%s", real_path)
+    end
+  elseif stat.type == "file" then
+    if not uv.fs_access(real_path, "R") then
+      return fail("绑定文件当前不可访问：%s", real_path)
+    end
+  else
+    return fail("绑定目标必须是目录或文件：%s", normalized)
   end
-  if not uv.fs_access(real_path, "R") or not uv.fs_access(real_path, "X") then
-    return fail("绑定目录当前不可访问：%s", real_path)
-  end
-  return { name = alias, path = real_path }
+  return { name = alias, path = real_path, type = stat.type }
 end
 
 local function assert_dense_array(value, label)
@@ -304,7 +309,7 @@ function M.validate_folders(folders)
     if type(item.path) ~= "string" or item.path == "" then
       return fail("folders[%d].path 必须是非空字符串", index)
     end
-    local folder, folder_err = resolve_folder(item.path, item.name)
+    local folder, folder_err = resolve_target(item.path, item.name)
     if not folder then
       return nil, folder_err
     end
@@ -312,7 +317,7 @@ function M.validate_folders(folders)
       return fail("folder 名称重复：%s", folder.name)
     end
     if by_path[folder.path] then
-      return fail("同一目录不能重复绑定：%s", folder.path)
+      return fail("同一目标不能重复绑定：%s", folder.path)
     end
     by_name[folder.name] = true
     by_path[folder.path] = true
@@ -467,7 +472,8 @@ function M.attach(root, path, opts)
   if not workspace then
     return nil, workspace_err
   end
-  local folder, folder_err = resolve_folder(path, opts.name)
+  path = path or vim.fn.getcwd()
+  local folder, folder_err = resolve_target(path, opts.name)
   if not folder then
     return nil, folder_err
   end

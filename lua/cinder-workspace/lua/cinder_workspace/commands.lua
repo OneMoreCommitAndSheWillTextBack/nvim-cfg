@@ -68,10 +68,7 @@ local function execute(api, command)
     local _, err = api.open(root)
     notify_error(err)
   elseif subcommand == "attach" then
-    local path = require_arg(args, 2, ":CinderWorkspace attach {dir} [name]")
-    if not path then
-      return
-    end
+    local path = args[2] ~= "" and args[2] or nil
     local opts = args[3] and { name = args[3] } or nil
     local _, err = api.attach(path, opts)
     notify_error(err)

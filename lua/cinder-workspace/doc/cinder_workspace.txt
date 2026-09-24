@@ -38,9 +38,10 @@ current working directory, manage tabs or buffers, or delete source content.
 :CinderWorkspace open {root}
         Validate an existing workspace directory and select it.
 
-:CinderWorkspace attach {directory} [name]
-        Add a directory symlink to the selected workspace. The name defaults
-        to the source directory basename.
+:CinderWorkspace attach [directory] [name]
+        Add a symlink to a directory or file in the selected workspace. When
+        directory is omitted, the current working directory is used. The name
+        defaults to the source basename.
 
 :CinderWorkspace detach {name}
         Remove one symlink. The source directory is never removed.

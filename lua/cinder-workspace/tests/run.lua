@@ -122,6 +122,56 @@ run_case("attach/detach conflicts and source protection", function()
   end)
 end)
 
+run_case("attach file targets and cwd default", function()
+  with_temp_workspace(function(paths)
+    local root, err = workspace.new("files")
+    assert(root, err)
+    local file = paths.sources .. "/notes.md"
+    write(file, "hello\n")
+    local real_file = uv.fs_realpath(file)
+
+    local entry, attach_err = workspace.attach(file)
+    assert(entry, attach_err)
+    assert(entry.name == "notes.md")
+    assert(entry.type == "file")
+    assert(uv.fs_readlink(root .. "/notes.md") == real_file)
+
+    local duplicate, duplicate_err = workspace.attach(file)
+    assert(duplicate, duplicate_err)
+    assert(duplicate.name == "notes.md")
+
+    local snapshot, read_err = workspace.current()
+    assert(snapshot, read_err)
+    assert(#snapshot.folders == 1)
+    assert(snapshot.folders[1].name == "notes.md")
+
+    workspace.setup()
+    local original_cwd = vim.fn.getcwd()
+    vim.cmd("cd " .. vim.fn.fnameescape(paths.beta))
+    local command_ok = pcall(vim.cmd, "CinderWorkspace attach")
+    local default, default_err = workspace.attach()
+    vim.cmd("cd " .. vim.fn.fnameescape(original_cwd))
+    assert(command_ok)
+    assert(uv.fs_readlink(root .. "/beta") == uv.fs_realpath(paths.beta))
+    assert(default, default_err)
+    assert(default.name == "beta")
+
+    local snapshot_path = paths.snapshot_dir .. "/files.json"
+    local written, write_err = workspace.export(snapshot_path)
+    assert(written, write_err)
+
+    workspace.close()
+    local second_base = mkdir(paths.root .. "/file-base")
+    vim.env.CINDER_WORKSPACE = second_base
+    local imported, import_err = workspace.import(snapshot_path)
+    assert(imported, import_err)
+    assert(uv.fs_readlink(imported .. "/notes.md") == real_file)
+
+    assert(workspace.detach("notes.md"))
+    assert(not uv.fs_lstat(imported .. "/notes.md"))
+  end)
+end)
+
 run_case("invalid CINDER_WORKSPACE does not fall back", function()
   with_temp_workspace(function(paths)
     vim.env.CINDER_WORKSPACE = paths.root .. "/missing"
