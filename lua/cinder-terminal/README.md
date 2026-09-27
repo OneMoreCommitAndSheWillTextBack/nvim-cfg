@@ -1,20 +1,21 @@
 # cinder-terminal.nvim
 
-One floating workspace for every terminal you own. A containers panel on top
-left, the terminals of the selected container below it, and the terminal pane
-on the right — the layout lazygit uses, built directly on `nvim_open_win`
-(no snacks.nvim dependency).
+One floating workspace for every terminal you own. A containers card on top
+left, the terminals of the selected container in the card below it, and the
+terminal card on the right — the layout lazygit uses. The chrome is drawn with
+the card library in `lua/cinder-ui` (no snacks.nvim dependency): the whole
+workspace is one card tree in a single buffer, and the pane's real terminal
+window covers the content area of the card it belongs to.
 
 ```text
-╭─ Containers ────┬──────────────────────────────────╮
-│   local    2    │                                  │
-│ T dev      2    │        terminal                  │
-├─ dev ───────────┤                                  │
-│ 1 bash          │                                  │
-│ 2 nvim          │                                  │
-├─────────────────┴──────────────────────────────────┤
-│ [j/k] move  [l] open  [n] new  [d] kill  [Tab] term │
-╰────────────────────────────────────────────────────╯
+╭─Containers──────────────╮╭─Terminal────────────────────────────────────╮
+│  local  1 shell         ││                                             │
+╰─────────────────────────╯│                                             │
+╭─local───────────────────╮│                                             │
+│1 ~/Code/task/nvim-c...  ││                                             │
+│                         ││                                             │
+╰─────────────────────────╯╰─────────────────────────────────────────────╯
+ [C-\ / Esc Esc] normal mode  [C-b] items  [C-/] hide
 ```
 
 Two providers supply the rows:
@@ -38,8 +39,8 @@ The plugin installs no global mappings; the panels use buffer-local ones.
 
 | Context | Keys |
 | --- | --- |
-| Containers | `j`/`k`, `l` or `<CR>` open, `n` new, `d` kill, `r` rename, `R` refresh/retry, `q` hide, `?` keys |
-| Terminals | `j`/`k`, `1`-`9`/`0` switch to that terminal, `h` containers, `l` or `<CR>` focus terminal, `n` new, `d` kill, `r` rename (tmux) or restart (local) |
+| Containers | `j`/`k` (counts), `gg`/`G`, `<C-d>`/`<C-u>` move, `l` or `<CR>` open, `n` new, `d` kill, `r` rename, `R` refresh/retry, `q` hide, `?` keys |
+| Terminals | `j`/`k` (counts), `gg`/`G`, `<C-d>`/`<C-u>` move, `1`-`9`/`0` switch to that terminal, `h` containers, `l` or `<CR>` focus terminal, `n` new, `d` kill, `r` rename (tmux) or restart (local) |
 | Terminal pane, typing | `<C-\>` or `<Esc><Esc>` leave the job; `<C-b>` brings the terminal list back |
 | Terminal pane, normal mode | `i` back to the job, `j`/`k`, `gg`, `<C-d>` and every other native key (scroll, `v`/`y` select and yank, `/` search, `q` records a macro), `<Tab>` back to the list |
 | Anywhere (not while typing) | `<Tab>`/`<S-Tab>` swap the sidebar and the terminal pane, `<C-/>` hide |
@@ -64,9 +65,11 @@ a macro and `h` is a motion, as they are in any other buffer. The action is
 still in the table, just unbound — `keymaps = { items = "q" }` puts the old
 jump back, and the hint row starts advertising it again.
 
-Native motions work in both panels: `gg`, `G`, `<C-d>`, `<C-u>`, `zz`, `/`.
-`R` re-reads every provider and retries a terminal that failed to attach, which
-is also how a tmux client that backed off after repeated failures comes back.
+The sidebar rows are card data, not a buffer cursor, so the familiar motions
+are bound by the plugin instead of inherited: `j`/`k` take a count, `gg`/`G`
+jump to the ends and `<C-d>`/`<C-u>` move half a card at a time. `R` re-reads
+every provider and retries a terminal that failed to attach, which is also how
+a tmux client that backed off after repeated failures comes back.
 
 Every key above is declared once in `lua/cinder_terminal/interaction.lua`: the
 same table generates the buffer-local mappings, the hint row and the `?` popup,
@@ -82,12 +85,15 @@ rest are left alone, so the pane never costs you a motion or the record key:
 `<Tab>` is the one key that leaves it.
 
 `<C-\>` leaves the job in one key, and `<Esc><Esc>` does the same, because
-that is the gesture people reach for. Neither costs the job anything: the pane
-binds a *single* `<Esc>`, forwards that byte itself, and only a second press
-within `escape_window` (300ms) counts as the gesture. A literal
-`<Esc><Esc>` mapping would make Neovim hold every lone `<Esc>` for
-`timeoutlen` before the job saw it, and `<Esc>` is the key a TUI waits for —
-so `timeoutlen` no longer matters here at all.
+that is the gesture people reach for. The pane binds a *single* `<Esc>`,
+forwards that byte to the job itself, and only a second press within
+`escape_window` (300ms) counts as the gesture: a literal `<Esc><Esc>` mapping
+would make Neovim hold every lone `<Esc>` for `timeoutlen` before the job saw
+it, and `<Esc>` is the key a TUI waits for, so `timeoutlen` plays no part
+here. The price is exact and worth knowing: the gesture sends one `<Esc>` to
+the job, so a program that treats `<Esc>` as a prefix (readline, emacs) reads
+it as Meta and applies it to the next key typed. `<C-\>` is consumed by
+Neovim and is the one to use when the job must not see an `<Esc>` at all.
 `keymaps.terminal_normal` replaces the escape list (a string, a list, or
 `false` to keep only Neovim's own sequence), so a pane that needs `<C-\>`
 literally — a nested editor — can turn it off.
@@ -100,7 +106,10 @@ which the job would receive as input instead.
 Killing or restarting the terminal shown in the right panel never takes the
 workspace down with it: the pane is released before the old buffer goes away,
 and `WinClosed` hides the workspace instead of leaving half of it on screen if
-a panel window is closed from the outside.
+a panel window is closed from the outside. The workspace itself is a card tree
+(`lua/cinder_terminal/ui.lua` `build_tree()`): sidebar column, terminal card
+and a one-row hint card, redrawn into the app buffer on every change; only the
+terminal pane is a second, real window.
 
 ## Commands
 

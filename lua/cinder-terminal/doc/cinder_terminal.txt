@@ -15,37 +15,41 @@ CONTENTS                                                     *cinder-terminal*
 ==============================================================================
 INTRODUCTION                                     *cinder-terminal-introduction*
 
-cinder-terminal.nvim owns one floating workspace made of three panels and a
+cinder-terminal.nvim owns one floating workspace made of three cards and a
 contextual key hint row:
 
 >
-    ╭─ Containers ────┬───────────────────────────╮
-    │   local    2    │                           │
-    │ T dev      2    │        terminal           │
-    ├─ dev ───────────┤                           │
-    │ 1 bash          │                           │
-    │ 2 nvim          │                           │
-    ├─────────────────┴───────────────────────────┤
-    │ [j/k] move  [l] open  [n] new  [d] kill     │
-    ╰─────────────────────────────────────────────╯
+    ╭─Containers──────────────╮╭─Terminal───────────────────────╮
+    │  local  1 shell         ││                                │
+    ╰─────────────────────────╯│                                │
+    ╭─local───────────────────╮│                                │
+    │1 ~/Code/task/nvim-c...  ││                                │
+    │                         ││                                │
+    ╰─────────────────────────╯╰────────────────────────────────╯
+     [C-\ / Esc Esc] normal mode  [C-b] items  [C-/] hide
 <
 
-The containers panel lists everything that can hold a terminal, the items
-panel lists the terminals of the selected container, and the terminal panel
-shows the one the cursor points at. Rows come from providers: `local` owns
-Neovim pty sessions, `tmux` owns tmux sessions and windows.
+The containers card lists everything that can hold a terminal, the items card
+lists the terminals of the selected container, and the terminal card shows the
+one the selection points at. The chrome comes from the card library in
+`lua/cinder-ui`: one card tree in a single buffer, with the real terminal
+window sitting on the terminal card's content area. Rows come from providers:
+`local` owns Neovim pty sessions, `tmux` owns tmux sessions and windows.
 
 The plugin installs no global mappings; every key below is buffer local.
 
 ==============================================================================
 LAYOUT AND KEYMAPS                                     *cinder-terminal-keys*
 
-The cursor lives in one of three places. `h` and `l` move between them, so the
-active panel is always visible instead of being a hidden mode.
+The selection lives in one of three cards. `h` and `l` move between them, so
+the active card is always visible instead of being a hidden mode. A list row
+is card data rather than a buffer cursor: `j`/`k`, `gg`/`G` and `<C-d>`/`<C-u>`
+are bound by the plugin and the visible scroll follows the selection.
 
-Containers panel (top left):
-    j / k         Move between containers (native motions, `gg` and `G` work)
-    l or <CR>     Move into the items panel
+Containers card (top left):
+    j / k         Move between containers; counts, `gg`/`G` and `<C-d>`/`<C-u>`
+                  work. The scroll follows the selection
+    l or <CR>     Move into the items card
     n             Create a container; picks from a `vim.ui.select()` menu
     d             Kill the selected container and everything inside it
     r             Rename the selected container
@@ -53,10 +57,11 @@ Containers panel (top left):
     q             Hide the workspace
     ?             Show every keymap
 
-Items panel (bottom left):
-    j / k         Move between terminals of the selected container
-    h             Move back to the containers panel
-    l or <CR>     Focus the terminal panel
+Items card (bottom left):
+    j / k         Move between terminals of the selected container, with the
+                  same counts, `gg`/`G` and `<C-d>`/`<C-u>`
+    h             Move back to the containers card
+    l or <CR>     Focus the terminal card
     1-9 / 0       Switch to that terminal (0 is the tenth) and hand it the
                   keyboard in one key; each row wears its digit
     n             Create a terminal in the selected container
@@ -65,14 +70,14 @@ Items panel (bottom left):
     R             Refresh and retry a failed terminal attach
     q             Hide the workspace
 
-Terminal panel, while typing (Terminal mode):
+Terminal card, while typing (Terminal mode):
     <C-\>         Leave the job (one key; Neovim's own <C-\><C-n> still
                   works, it just no longer waits for the second key)
     <Esc><Esc>    The same, as the gesture people actually press
     <C-b>         Leave the job for the terminal list; the byte is not sent
                   to the program, and no tmux prefix is reached from here
 
-Terminal panel, normal mode:
+Terminal card, normal mode:
     i             Send keys to the job again
     j / k         Scroll the scrollback. This is a real normal mode: `gg`,
                   `/`, `yy`, `<C-d>`, marks and the rest are Neovim's own, and
@@ -81,40 +86,44 @@ Terminal panel, normal mode:
     <Tab>         Move back to items list (the swap; `q`, `h` and the rest of
                   normal mode stay Neovim's own)
 
-The pane looks the same in both modes, so the title gains `normal` and the key
-row switches to the keys that work right now. The row never advertises a key
-that the current mode would swallow: while keys go to the job <Tab> completes
+The pane looks the same in both modes, so the terminal card's title gains
+`normal` and the key row switches to the keys that work right now. The row
+never advertises a key that the current mode would swallow: while keys go to
+the job <Tab> completes
 and `?` is typed into the program, so neither is listed there, and in the pane
 `?` stays Neovim's backward search. Press `?` in a list panel to see every
 keymap, including the ones the pane deliberately leaves alone.
 
-Neither escape key costs the job anything. The pane binds a single <Esc>,
-forwards that byte to the job itself and only counts a second press inside
-`escape_window` as the <Esc><Esc> gesture, so a lone <Esc> arrives the moment
-it is pressed and 'timeoutlen' plays no part. `keymaps.terminal_normal`
-replaces the list (a string, a list, or `false`); `false` leaves only Neovim's
-own <C-\><C-n> for panes that have to receive a literal <C-\> (a nested
-editor, for example).
+The pane binds a single <Esc>, forwards that byte to the job itself and only
+counts a second press inside `escape_window` as the <Esc><Esc> gesture, so a
+lone <Esc> arrives the moment it is pressed and 'timeoutlen' plays no part.
+The gesture therefore sends one <Esc> into the job: a program that treats
+<Esc> as a prefix (readline, emacs) reads it as Meta and applies it to the
+next key. <C-\> is consumed by Neovim instead and is the one to use when the
+job must not see an <Esc> at all. `keymaps.terminal_normal` replaces the list
+(a string, a list, or `false`); `false` leaves only Neovim's own <C-\><C-n>
+for panes that have to receive a literal <C-\> (a nested editor, for
+example).
 
-The terminal panel always shows the terminal the items cursor points at, so
-moving in the items panel is what switches windows. When the selection has no
-terminal (an empty container, or everything killed) the panel shows
+The terminal card always shows the terminal the items selection points at, so
+moving in the items card is what switches windows. When the selection has no
+terminal (an empty container, or everything killed) the card shows
 `select a terminal with l`.
 
 Anywhere:
     <Tab>         Swap the sidebar and the terminal pane: from either sidebar
-                  panel it hands the keyboard to the terminal, and from the
-                  terminal it comes back to the list. The containers panel is
+                  card it hands the keyboard to the terminal, and from the
+                  terminal it comes back to the list. The containers card is
                   not a stop, so switching never costs a hop through the
                   container tree; walk the tree with `h` (up) and `l` (down).
     <S-Tab>       The same swap
     <C-/>         Hide or show the workspace (configured by the user)
 
 Creating (`n`):
-    - In the containers panel a menu offers every provider that can create
+    - In the containers card a menu offers every provider that can create
       something, for example `local terminal` and `tmux session`. With a
       single provider the entry is used directly.
-    - In the items panel the container is already known, so `n` creates a
+    - In the items card the container is already known, so `n` creates a
       terminal in it without a menu.
 
 ==============================================================================
@@ -148,7 +157,9 @@ panel has focus the panels follow the active window; while a panel has focus
 the selection stays where the user put it.
 
 Hiding the workspace never kills the tmux client or the tmux server. tmux
-ownership stays with tmux: quitting Neovim leaves sessions running.
+ownership stays with tmux: quitting Neovim leaves sessions running. The
+workspace chrome itself adds no dependency beyond `lua/cinder-ui`, the card
+library in the same repository.
 
 Requires the `tmux` binary. Without it the provider stays silent and the
 create menu stops offering tmux sessions.

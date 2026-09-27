@@ -1,9 +1,11 @@
 ---@class CinderTerminal.UI
----Lazygit style workspace: a single frosted frame split into a containers
----panel (top left), an items panel (bottom left), a terminal panel (right)
----and a contextual key hint row.
+---Lazygit style workspace drawn as cinder-ui cards: a containers card over an
+---items card in the sidebar column, a terminal card on the right and a
+---one-row hint card under both. The terminal card is only chrome: a real
+---terminal window covers its content area, so the job keeps the native keys.
 local layout = require("cinder_terminal.layout")
 local interaction = require("cinder_terminal.interaction")
+local ui = require("cinder_ui")
 
 local M = {}
 M.__index = M
@@ -16,12 +18,11 @@ local api = vim.api
 local ESCAPE_WINDOW_MS = 300
 local fn = vim.fn
 
-local FRAME_NS = api.nvim_create_namespace("CinderTerminal.Frame")
-local CONTAINERS_NS = api.nvim_create_namespace("CinderTerminal.Containers")
-local ITEMS_NS = api.nvim_create_namespace("CinderTerminal.Items")
-
-local PANELS = { "containers", "items" }
+local SIDEBAR_PANELS = { "containers", "items" }
 local ATTACH_DEBOUNCE = 60
+
+---The cell a card spends on each side; card content widths subtract it.
+local CARD_BORDER = 2
 
 local function valid_win(win)
   return win ~= nil and api.nvim_win_is_valid(win)
@@ -130,12 +131,14 @@ function M.new(opts)
     state = {
       opened = false,
       focus = "items",
+      card_focus = "items",
       containers = {},
       items = {},
       selected_container_id = nil,
       selected_item_id = nil,
       memory = {},
-      line_ids = { containers = {}, items = {} },
+      scroll = { containers = 0, items = 0 },
+      app = nil,
       win = {},
       buf = {},
       layout = nil,
@@ -189,11 +192,7 @@ end
 -- Lifecycle ----------------------------------------------------------------
 
 function M:is_open()
-  return self.state.opened
-    and valid_win(self.state.win.frame)
-    and valid_win(self.state.win.containers)
-    and valid_win(self.state.win.items)
-    and valid_win(self.state.win.terminal)
+  return self.state.opened and valid_win(self.state.win.app) and valid_win(self.state.win.terminal)
 end
 
 function M:dimensions()
@@ -210,8 +209,7 @@ function M:dimensions()
 end
 
 ---@param win number
----@param kind string
-function M:apply_window_options(win, kind)
+local function base_window_options(win)
   if not valid_win(win) then
     return
   end
@@ -222,62 +220,85 @@ function M:apply_window_options(win, kind)
   vim.wo[win].wrap = false
   vim.wo[win].list = false
   vim.wo[win].spell = false
-  vim.wo[win].cursorline = kind == "containers" or kind == "items"
-  vim.wo[win].winfixbuf = kind == "terminal"
-  -- The frame is only the backdrop of the workspace. A winbar on it would eat
-  -- one of its rows and push the contextual help row out of the window, so the
-  -- chrome belongs to the three panels alone.
-  if kind ~= "frame" then
-    self:update_panel_chrome(win, kind)
+end
+
+---Window chrome of the two real windows. Card borders, titles, the selection
+---bar and the hint row are all drawn by cinder-ui into the app buffer, so no
+---window carries a winbar or a cursorline any more.
+function M:apply_window_options()
+  local state = self.state
+  local hl = self:highlights()
+  local app = state.win.app
+  if valid_win(app) then
+    base_window_options(app)
+    vim.wo[app].winhighlight = table.concat({
+      "Normal:" .. hl.sidebar,
+      "NormalNC:" .. hl.sidebar,
+      "EndOfBuffer:" .. hl.sidebar,
+      "FloatBorder:" .. hl.border,
+      "FloatTitle:" .. hl.title,
+    }, ",")
+  end
+  local term = state.win.terminal
+  if valid_win(term) then
+    base_window_options(term)
+    vim.wo[term].winfixbuf = true
+    -- Both pane modes look identical, so the card title carries the marker.
+    vim.wo[term].winhighlight = table.concat({
+      "Normal:" .. hl.normal,
+      "NormalNC:" .. hl.normal,
+      "EndOfBuffer:" .. hl.normal,
+    }, ",")
   end
 end
 
----@param kind string
 ---@return string
-function M:panel_title(kind)
-  local state = self.state
-  local hl = self:highlights()
-  local group = state.focus == kind and hl.title or hl.title_inactive
-  local text
-  if kind == "containers" then
-    text = " Containers"
-  elseif kind == "items" then
-    local container = self:selected_container()
-    text = " " .. ((container and container.label) or "Terminals")
-  else
-    text = state.terminal_title ~= "" and (" " .. state.terminal_title) or " Terminal"
-    -- Both modes look identical in the pane, so the winbar carries the mode
-    -- marker a statusline would show.
-    if kind == "terminal" and self:pane_normal_mode() then
-      return "%#" .. group .. "#" .. text .. " %#" .. hl.detail .. "# normal "
-    end
-  end
-  return "%#" .. group .. "#" .. text .. " "
+function M:containers_title()
+  return "Containers"
 end
 
----@param win? number
----@param kind? string
-function M:update_panel_chrome(win, kind)
+---@return string
+function M:items_title()
+  local container = self:selected_container()
+  return (container and container.label) or "Terminals"
+end
+
+---@return string
+function M:terminal_title()
   local state = self.state
-  local hl = self:highlights()
-  local kinds = kind and { kind } or { "containers", "items", "terminal" }
-  for _, name in ipairs(kinds) do
-    local target = win or state.win[name]
-    if valid_win(target) then
-      vim.wo[target].winbar = self:panel_title(name)
-      local focused = state.focus == name
-      local normal = name == "terminal" and hl.normal or hl.sidebar
-      -- `CursorLineNC` does not exist, so the unfocused panel remaps
-      -- `CursorLine` itself and dims through `selected_inactive`.
-      local cursorline = focused and hl.selected or hl.selected_inactive
-      vim.wo[target].winhighlight = table.concat({
-        "Normal:" .. normal,
-        "NormalNC:" .. normal,
-        "EndOfBuffer:" .. normal,
-        "CursorLine:" .. cursorline,
-      }, ",")
-    end
+  local label = state.terminal_title ~= "" and state.terminal_title or "Terminal"
+  local marker = self:pane_normal_mode() and "  ·  normal" or ""
+  -- The card spends one cell per border and two more before the title, so a
+  -- long terminal name must be cut here: otherwise the marker is clipped away
+  -- and the pane silently stops saying which mode it is in.
+  local budget = (state.layout and state.layout.terminal_width or 60) - 4
+  return display_text(label, math.max(1, budget - #marker)) .. marker
+end
+
+---The terminal card is chrome: keep the real terminal window exactly on its
+---content area, so the card border and title stay visible around the job.
+function M:sync_terminal_window()
+  local state = self.state
+  local win = state.win.terminal
+  if not valid_win(win) or not state.app then
+    return
   end
+  local placement = state.app:placement("terminal")
+  local inner = placement and placement.inner
+  if not inner or inner.width < 1 or inner.height < 1 then
+    return
+  end
+  pcall(api.nvim_win_set_config, win, {
+    relative = "win",
+    win = state.win.app,
+    row = inner.row - 1,
+    col = inner.col - 1,
+    width = inner.width,
+    height = inner.height,
+    style = "minimal",
+    border = "none",
+    zindex = 45,
+  })
 end
 
 function M:create_windows()
@@ -285,58 +306,34 @@ function M:create_windows()
   local d = self:dimensions()
   state.layout = d
 
-  state.buf.frame = scratch("cinder_terminal_frame")
-  state.buf.containers = scratch("cinder_terminal_containers")
-  state.buf.items = scratch("cinder_terminal_items")
-  state.buf.hint = scratch("cinder_terminal_terminal", "hide")
-
-  state.win.frame = api.nvim_open_win(state.buf.frame, false, {
-    relative = "editor",
-    row = d.frame.row,
-    col = d.frame.col,
+  state.app = ui.App.new({
     width = d.frame.width,
     height = d.frame.height,
-    style = "minimal",
+    row = d.frame.row,
+    col = d.frame.col,
     border = self.opts.border,
-    focusable = false,
     zindex = 40,
+    focus = state.focus,
+    enter = false,
   })
-  state.win.containers = api.nvim_open_win(state.buf.containers, true, {
-    relative = "win",
-    win = state.win.frame,
-    row = d.containers.row,
-    col = d.containers.col,
-    width = d.containers.width,
-    height = d.containers.height,
-    style = "minimal",
-    border = "none",
-    zindex = 50,
-  })
-  state.win.items = api.nvim_open_win(state.buf.items, false, {
-    relative = "win",
-    win = state.win.frame,
-    row = d.items.row,
-    col = d.items.col,
-    width = d.items.width,
-    height = d.items.height,
-    style = "minimal",
-    border = "none",
-    zindex = 50,
-  })
+  state.app:open(self:build_tree())
+  state.win.app = state.app.win
+  state.buf.app = state.app.buf
+
+  state.buf.hint = scratch("cinder_terminal_terminal", "hide")
   state.win.terminal = api.nvim_open_win(state.buf.hint, false, {
     relative = "win",
-    win = state.win.frame,
-    row = d.terminal.row,
-    col = d.terminal.col,
-    width = d.terminal.width,
-    height = d.terminal.height,
+    win = state.win.app,
+    row = 0,
+    col = 0,
+    width = 1,
+    height = 1,
     style = "minimal",
     border = "none",
-    zindex = 50,
+    zindex = 45,
   })
-  for _, name in ipairs({ "frame", "containers", "items", "terminal" }) do
-    self:apply_window_options(state.win[name], name)
-  end
+  self:apply_window_options()
+  self:sync_terminal_window()
   self:map_buffers()
 end
 
@@ -347,45 +344,13 @@ function M:reflow()
   local state = self.state
   local d = self:dimensions()
   state.layout = d
-  for name, config in pairs({
-    frame = {
-      relative = "editor",
-      row = d.frame.row,
-      col = d.frame.col,
-      width = d.frame.width,
-      height = d.frame.height,
-    },
-    containers = {
-      row = d.containers.row,
-      col = d.containers.col,
-      width = d.containers.width,
-      height = d.containers.height,
-    },
-    items = { row = d.items.row, col = d.items.col, width = d.items.width, height = d.items.height },
-    terminal = { row = d.terminal.row, col = d.terminal.col, width = d.terminal.width, height = d.terminal.height },
-  }) do
-    local win = state.win[name]
-    if valid_win(win) then
-      if name ~= "frame" then
-        config.relative = "win"
-        config.win = state.win.frame
-      end
-      pcall(api.nvim_win_set_config, win, config)
-    end
-  end
-end
-
----The containers panel is sized from the number of containers, so it has to
----grow or shrink when sessions appear or disappear. Without this the list keeps
----the height it had when the workspace opened and quietly clips new entries.
-function M:fit_panels()
-  local state = self.state
-  if not state.layout then
-    return
-  end
-  if state.layout.containers.height ~= self:dimensions().containers.height then
-    self:reflow()
-  end
+  state.app:set_geometry({
+    width = d.frame.width,
+    height = d.frame.height,
+    row = d.frame.row,
+    col = d.frame.col,
+  })
+  self:render()
 end
 
 function M:setup_autocmds()
@@ -394,16 +359,6 @@ function M:setup_autocmds()
     return
   end
   state.augroup = api.nvim_create_augroup("CinderTerminalUI", { clear = true })
-
-  api.nvim_create_autocmd("CursorMoved", {
-    group = state.augroup,
-    callback = function()
-      local kind = self:kind_of_window(api.nvim_get_current_win())
-      if kind == "containers" or kind == "items" then
-        self:on_cursor_moved(kind)
-      end
-    end,
-  })
 
   api.nvim_create_autocmd("WinEnter", {
     group = state.augroup,
@@ -424,10 +379,9 @@ function M:setup_autocmds()
       if valid_win(win) and api.nvim_get_current_win() == win then
         state.terminal_insert = api.nvim_get_mode().mode == "t"
       end
-      -- The pane carries its mode in the title and swaps the hint row between
-      -- insert and normal keys, so both have to follow the mode.
-      self:update_panel_chrome(state.win.terminal, "terminal")
-      self:render_frame()
+      -- The terminal card title carries the mode and the hint row swaps
+      -- between insert and normal keys, so both have to follow the mode.
+      self:render()
     end,
   })
 
@@ -438,7 +392,6 @@ function M:setup_autocmds()
         return
       end
       self:reflow()
-      self:render()
     end,
   })
 
@@ -451,10 +404,11 @@ function M:setup_autocmds()
     end,
   })
 
-  -- Closing one panel (`:q`, `:bd` on the terminal buffer, a window manager
-  -- quirk) would otherwise leave the workspace half alive: `is_open()` turns
-  -- false while the other windows stay on screen. Hiding the workspace keeps
-  -- every session alive and the next open rebuilds it.
+  -- Closing the workspace float or the terminal pane (`:q`, `:bd` on the
+  -- terminal buffer, a window manager quirk) would otherwise leave the
+  -- workspace half alive: `is_open()` turns false while the other window stays
+  -- on screen. Hiding the workspace keeps every session alive and the next
+  -- open rebuilds it.
   api.nvim_create_autocmd("VimLeavePre", {
     group = state.augroup,
     callback = function()
@@ -469,7 +423,7 @@ function M:setup_autocmds()
       if not win or not state.opened or state.shutting_down then
         return
       end
-      if not (self:kind_of_window(win) or state.win.frame == win) then
+      if win ~= state.win.app and win ~= state.win.terminal then
         return
       end
       vim.schedule(function()
@@ -523,7 +477,7 @@ end
 function M:open()
   local state = self.state
   if self:is_open() then
-    self:set_focus(state.focus == "terminal" and "terminal" or "items", { insert = state.focus == "terminal" })
+    self:set_focus(state.focus == "terminal" and "terminal" or state.card_focus, { insert = state.focus == "terminal" })
     return
   end
   state.opened = true
@@ -554,10 +508,14 @@ function M:close()
     state.attach_timer = nil
   end
   pcall(vim.cmd.stopinsert)
-  for _, win in pairs(state.win) do
+  for _, win in pairs({ state.win.terminal }) do
     if valid_win(win) then
       pcall(api.nvim_win_close, win, true)
     end
+  end
+  if state.app then
+    state.app:close()
+    state.app = nil
   end
   for _, buf in pairs(state.buf) do
     if valid_buf(buf) then
@@ -658,8 +616,7 @@ function M:select_item(id, opts)
   if state.selected_container_id then
     state.memory[state.selected_container_id] = id
   end
-  self:render_frame()
-  self:update_panel_chrome()
+  self:render()
   if opts.attach ~= false then
     self:schedule_attach()
   end
@@ -711,36 +668,217 @@ end
 
 -- Rendering ----------------------------------------------------------------
 
-function M:render()
-  if not self:is_open() then
-    return
-  end
+---Index of the selected row in one of the two lists.
+---@param kind string
+---@return number?
+function M:selected_index(kind)
   local state = self.state
-  local d = self:dimensions()
-  state.layout = d
-  state.rendering = true
-  self:render_frame()
-  self:render_containers()
-  self:render_items()
-  self:update_panel_chrome()
-  self:render_terminal()
-  state.rendering = false
+  local list = kind == "containers" and state.containers or state.items
+  local id = kind == "containers" and state.selected_container_id or state.selected_item_id
+  for index, node in ipairs(list) do
+    if node.id == id then
+      return index
+    end
+  end
 end
 
-function M:help_text()
+---Visible rows of one card: its height minus the two border rows.
+---@param kind string
+---@return number
+function M:view_height(kind)
+  local d = self.state.layout or self:dimensions()
+  if kind == "containers" then
+    return math.max(1, d.container_rows - CARD_BORDER)
+  end
+  return math.max(1, d.items_rows - CARD_BORDER)
+end
+
+---Keep the selected row inside the card window. The selection lives in the
+---card data, not in the buffer cursor, so the window is data too.
+function M:sync_scroll()
   local state = self.state
+  for _, kind in ipairs(SIDEBAR_PANELS) do
+    local list = kind == "containers" and state.containers or state.items
+    local cursor = self:selected_index(kind)
+    if cursor then
+      state.scroll[kind] = ui.ensure_visible(cursor, state.scroll[kind], self:view_height(kind), #list)
+    else
+      state.scroll[kind] = 0
+    end
+  end
+end
+
+---Text budget of a row: the card content minus the mark/digit column and the
+---two spaces that separate it from the label.
+---@return number
+function M:row_text_width()
+  local d = self.state.layout
+  local inner = math.max(8, (d and d.sidebar_width or 30) - CARD_BORDER)
+  return inner - 4
+end
+
+---@return table[]
+function M:containers_rows()
+  local state = self.state
+  local hl = self:highlights()
+  local width = self:row_text_width()
+  local rows = {}
+  for _, node in ipairs(state.containers) do
+    rows[#rows + 1] = {
+      segments = {
+        { text = node.mark and (node.mark .. " ") or "  ", hl = node.mark and hl.mark or nil },
+        { text = display_text(node.label, width) },
+        { text = node.detail and ("  " .. node.detail) or "", hl = hl.detail },
+      },
+    }
+  end
+  return rows
+end
+
+---The digit is part of the list, not of the hint row: it says which key
+---reaches this terminal, and only the ten a digit can address wear one.
+---@return table[]
+function M:items_rows()
+  local state = self.state
+  local hl = self:highlights()
+  local width = self:row_text_width()
+  local rows = {}
+  for index, node in ipairs(state.items) do
+    local digit = index <= 10 and ((index % 10) .. " ") or "  "
+    rows[#rows + 1] = {
+      segments = {
+        { text = digit, hl = hl.detail },
+        { text = display_text(node.label, width) },
+        { text = node.detail and ("  " .. node.detail) or "", hl = detail_group(node, hl) },
+      },
+    }
+  end
+  return rows
+end
+
+---@return string
+function M:items_empty()
+  local provider = self:provider(self:selected_container())
+  if provider and provider.capabilities.create_terminal then
+    return "  n  new terminal"
+  end
+  return "  empty"
+end
+
+---@return table
+function M:containers_data()
+  return {
+    items = self:containers_rows(),
+    cursor = self:selected_index("containers") or 0,
+    top = self.state.scroll.containers,
+    empty = "  no containers",
+  }
+end
+
+---@return table
+function M:items_data()
+  return {
+    items = self:items_rows(),
+    cursor = self:selected_index("items") or 0,
+    top = self.state.scroll.items,
+    empty = self:items_empty(),
+  }
+end
+
+---The hint row, straight out of `interaction`; a pending message wins.
+---@return { text: string, hl: string }[]
+function M:hint_line()
+  local state = self.state
+  local hl = self:highlights()
+  local width = math.max(8, (state.layout and state.layout.inner_width or 80) - 1)
   if state.message then
-    return " " .. display_text(state.message, state.layout and state.layout.inner_width - 2 or 80)
+    return { { text = " " .. display_text(state.message, width), hl = hl.error } }
   end
   local parts = {}
   for _, entry in ipairs(self:context_keys()) do
     parts[#parts + 1] = "[" .. entry.key .. "] " .. entry.desc
   end
-  local text = " " .. table.concat(parts, "  ") .. " "
-  if state.layout then
-    text = display_text(text, state.layout.inner_width)
+  return { { text = display_text(" " .. table.concat(parts, "  ") .. " ", width), hl = hl.help } }
+end
+
+---The card tree of the workspace: the sidebar column (containers over items),
+---the terminal card whose content area the real terminal window covers, and
+---the hint card under both.
+---@return table
+function M:build_tree()
+  local state = self.state
+  local d = state.layout
+  return ui.card({
+    layout = "column",
+    children = {
+      ui.card({
+        border = false,
+        layout = "row",
+        height = ui.flex(1),
+        children = {
+          ui.card({
+            border = false,
+            layout = "column",
+            width = d.sidebar_width,
+            children = {
+              ui.card({
+                id = "containers",
+                title = self:containers_title(),
+                height = d.container_rows,
+                body = ui.list({
+                  get = function()
+                    return self:containers_data()
+                  end,
+                }),
+              }),
+              ui.card({
+                id = "items",
+                title = self:items_title(),
+                height = ui.flex(1, { min = 4 }),
+                body = ui.list({
+                  get = function()
+                    return self:items_data()
+                  end,
+                }),
+              }),
+            },
+          }),
+          ui.card({
+            id = "terminal",
+            title = self:terminal_title(),
+            width = ui.flex(1, { min = 25 }),
+            body = ui.text({
+              get = function()
+                return {}
+              end,
+            }),
+          }),
+        },
+      }),
+      ui.card({
+        border = false,
+        height = 1,
+        body = ui.text({
+          get = function()
+            return { self:hint_line() }
+          end,
+        }),
+      }),
+    },
+  })
+end
+
+function M:render()
+  if not self:is_open() then
+    return
   end
-  return text
+  local state = self.state
+  state.layout = self:dimensions()
+  self:sync_scroll()
+  state.app.focused_id = state.focus
+  state.app:open(self:build_tree())
+  self:sync_terminal_window()
+  self:render_terminal()
 end
 
 ---Where the keyboard is right now, for `interaction`. An explicit `kind`
@@ -804,189 +942,15 @@ function M:notify(text, level)
   end
   self.state.message = text
   self.state.message_level = level
-  self:render_frame()
+  self:render()
   vim.defer_fn(function()
     if self.state.message == text then
       self.state.message, self.state.message_level = nil, nil
       if self:is_open() then
-        self:render_frame()
+        self:render()
       end
     end
   end, 5000)
-end
-
-function M:render_frame()
-  local state = self.state
-  local d = state.layout
-  local buf = state.buf.frame
-  if not d or not valid_buf(buf) then
-    return
-  end
-  local hl = self:highlights()
-
-  local rows = {}
-  for row = 0, d.inner_height - 1 do
-    rows[row + 1] = string.rep(" ", d.inner_width)
-  end
-
-  local sep = d.separator_col
-  local divider = d.divider_row
-  for row = 0, d.body_height - 1 do
-    local line = rows[row + 1]
-    rows[row + 1] = line:sub(1, sep) .. "│" .. line:sub(sep + 2)
-  end
-  rows[divider + 1] = string.rep("─", sep) .. "┤" .. rows[divider + 1]:sub(sep + 2)
-  rows[d.help_row + 1] = self:help_text()
-
-  set_lines(buf, rows)
-  api.nvim_buf_clear_namespace(buf, FRAME_NS, 0, -1)
-
-  for row = 0, d.body_height - 1 do
-    mark(buf, FRAME_NS, hl.border, row, sep, sep + 1, 10)
-  end
-  mark(buf, FRAME_NS, hl.border, divider, 0, sep + 1, 10)
-  mark(buf, FRAME_NS, state.message and hl.error or hl.help, d.help_row, 0, #rows[d.help_row + 1], 10)
-
-  -- The separator segment around the focused panel glows, the way lazygit
-  -- highlights the border of the active panel.
-  if state.focus == "containers" then
-    for row = 0, divider - 1 do
-      mark(buf, FRAME_NS, hl.title, row, sep, sep + 1, 20)
-    end
-    mark(buf, FRAME_NS, hl.title, divider, 0, sep + 1, 20)
-  elseif state.focus == "items" then
-    for row = divider + 1, d.body_height - 1 do
-      mark(buf, FRAME_NS, hl.title, row, sep, sep + 1, 20)
-    end
-    mark(buf, FRAME_NS, hl.title, divider, 0, sep + 1, 20)
-  elseif state.focus == "terminal" then
-    for row = 0, d.body_height - 1 do
-      mark(buf, FRAME_NS, hl.title, row, sep, sep + 1, 20)
-    end
-  end
-end
-
-function M:render_containers()
-  local state = self.state
-  local buf, win = state.buf.containers, state.win.containers
-  if not valid_buf(buf) then
-    return
-  end
-  local hl = self:highlights()
-  local width = valid_win(win) and api.nvim_win_get_width(win) or 30
-  local lines, ids = {}, {}
-
-  for index, node in ipairs(state.containers) do
-    local line, spans = compose({
-      { node.mark and (node.mark .. " ") or "  ", node.mark and hl.mark or nil },
-      { display_text(node.label, width - 4) },
-      { node.detail and ("  " .. node.detail) or "", hl.detail },
-    })
-    ids[index] = node.id
-    lines[#lines + 1] = { line, spans }
-  end
-  if #lines == 0 then
-    lines[1] = { "  no containers", { { hl.detail, 2, 15 } } }
-  end
-
-  local text, spans = {}, {}
-  state.line_ids.containers = {}
-  for row, entry in ipairs(lines) do
-    text[row] = entry[1]
-    spans[row] = entry[2]
-    if ids[row] then
-      state.line_ids.containers[row] = ids[row]
-    end
-  end
-
-  api.nvim_buf_clear_namespace(buf, CONTAINERS_NS, 0, -1)
-  set_lines(buf, text)
-  for row, row_spans in ipairs(spans) do
-    for _, span in ipairs(row_spans) do
-      mark(buf, CONTAINERS_NS, span[1], row - 1, span[2], span[3], 10)
-    end
-  end
-  self:focus_cursor("containers")
-end
-
-function M:render_items()
-  local state = self.state
-  local buf, win = state.buf.items, state.win.items
-  if not valid_buf(buf) then
-    return
-  end
-  local hl = self:highlights()
-  local width = valid_win(win) and api.nvim_win_get_width(win) or 30
-  local lines, ids = {}, {}
-
-  -- The digit is part of the list, not of the hint row: it says which key
-  -- reaches this terminal, and only the ten a digit can address wear one.
-  for index, node in ipairs(state.items) do
-    local digit = index <= 10 and ((index % 10) .. " ") or "  "
-    local line, spans = compose({
-      { digit, hl.detail },
-      { display_text(node.label, width - 4) },
-      { node.detail and ("  " .. node.detail) or "", detail_group(node, hl) },
-    })
-    ids[index] = node.id
-    lines[#lines + 1] = { line, spans }
-  end
-  if #lines == 0 then
-    local container = self:selected_container()
-    local provider = self:provider(container)
-    local hint = provider and provider.capabilities.create_terminal and "  n  new terminal" or "  empty"
-    lines[1] = { hint, { { hl.detail, 2, #hint } } }
-  end
-
-  local text, spans = {}, {}
-  state.line_ids.items = {}
-  for row, entry in ipairs(lines) do
-    text[row] = entry[1]
-    spans[row] = entry[2]
-    if ids[row] then
-      state.line_ids.items[row] = ids[row]
-    end
-  end
-
-  api.nvim_buf_clear_namespace(buf, ITEMS_NS, 0, -1)
-  set_lines(buf, text)
-  for row, row_spans in ipairs(spans) do
-    for _, span in ipairs(row_spans) do
-      mark(buf, ITEMS_NS, span[1], row - 1, span[2], span[3], 10)
-    end
-  end
-  self:focus_cursor("items")
-end
-
-function M:focus_cursor(kind)
-  local state = self.state
-  local win = state.win[kind]
-  if not valid_win(win) then
-    return
-  end
-  local id = kind == "containers" and state.selected_container_id or state.selected_item_id
-  local row
-  for line, value in pairs(state.line_ids[kind]) do
-    if value == id then
-      row = line
-      break
-    end
-  end
-  if not row then
-    return
-  end
-  local current = api.nvim_win_get_cursor(win)[1]
-  if current ~= row then
-    pcall(api.nvim_win_set_cursor, win, { row, 0 })
-  end
-end
-
-function M:kind_of_window(win)
-  for _, name in ipairs({ "containers", "items", "terminal" }) do
-    if self.state.win[name] == win then
-      return name
-    end
-  end
 end
 
 function M:sync_focus_from_window()
@@ -994,21 +958,28 @@ function M:sync_focus_from_window()
   if not self:is_open() then
     return
   end
-  local kind = self:kind_of_window(api.nvim_get_current_win())
-  if not kind or kind == state.focus then
+  local win = api.nvim_get_current_win()
+  local target
+  if win == state.win.app then
+    target = state.card_focus
+  elseif win == state.win.terminal then
+    target = "terminal"
+  else
     return
   end
-  state.focus = kind
-  state.rendering = true
-  self:update_panel_chrome()
-  self:render_frame()
-  if kind ~= "terminal" then
-    self:focus_cursor(kind)
+  if target == state.focus then
+    return
   end
-  state.rendering = false
+  state.focus = target
+  if target == "terminal" then
+    state.terminal_insert = api.nvim_get_mode().mode == "t"
+  else
+    state.card_focus = target
+  end
+  self:render()
 end
 
----@param kind string
+---@param kind "containers"|"items"|"terminal"
 ---@param opts? { insert?: boolean }
 function M:set_focus(kind, opts)
   opts = opts or {}
@@ -1016,26 +987,24 @@ function M:set_focus(kind, opts)
   if not self:is_open() then
     return
   end
-  if not valid_win(state.win[kind]) then
+  local win = kind == "terminal" and state.win.terminal or state.win.app
+  if not valid_win(win) then
     return
   end
   state.focus = kind
-  state.rendering = true
-  self:update_panel_chrome()
-  self:render_frame()
-  state.rendering = false
+  if kind ~= "terminal" then
+    state.card_focus = kind
+    pcall(vim.cmd.stopinsert)
+  end
+  self:render()
+  api.nvim_set_current_win(win)
 
   if kind == "terminal" then
-    api.nvim_set_current_win(state.win.terminal)
     state.terminal_insert = opts.insert ~= false
-    if state.terminal_insert and vim.bo[api.nvim_win_get_buf(state.win.terminal)].buftype == "terminal" then
+    if state.terminal_insert and vim.bo[api.nvim_win_get_buf(win)].buftype == "terminal" then
       self:enter_terminal_insert()
     end
-    return
   end
-  pcall(vim.cmd.stopinsert)
-  api.nvim_set_current_win(state.win[kind])
-  self:focus_cursor(kind)
 end
 
 -- Terminal pane ------------------------------------------------------------
@@ -1122,7 +1091,7 @@ function M:set_terminal_buffer(buf, title)
     state.mapped_buffers[buf] = true
     self:map_terminal_buffer(buf)
   end
-  self:update_panel_chrome(win, "terminal")
+  self:render()
 end
 
 ---True while the pane holds a job that Neovim currently drives in normal
@@ -1343,7 +1312,6 @@ function M:apply_snapshot(results)
   end
 
   self:ensure_selection()
-  self:fit_panels()
 
   if state.attached_item_id then
     local alive = false
@@ -1362,32 +1330,6 @@ function M:apply_snapshot(results)
   self:render()
   if #errors > 0 then
     self:notify(table.concat(errors, "  "), "error")
-  end
-end
-
--- Cursor -------------------------------------------------------------------
-
----@param kind string
-function M:on_cursor_moved(kind)
-  local state = self.state
-  if state.rendering or not self:is_open() then
-    return
-  end
-  local win = state.win[kind]
-  if not valid_win(win) then
-    return
-  end
-  local row = api.nvim_win_get_cursor(win)[1]
-  local id = state.line_ids[kind][row]
-  if not id then
-    return
-  end
-  if kind == "containers" then
-    if id ~= state.selected_container_id then
-      self:select_container(id)
-    end
-  elseif id ~= state.selected_item_id then
-    self:select_item(id)
   end
 end
 
@@ -1431,6 +1373,8 @@ function M:action_open()
   end
 end
 
+---Move the selected row of the focused list by `delta` rows. Shared by the
+---`j`/`k`-family keys and by the public `next`/`prev` commands.
 ---@param delta number
 function M:move_selection(delta)
   local state = self.state
@@ -1439,22 +1383,53 @@ function M:move_selection(delta)
   if #list == 0 then
     return
   end
-  local current = kind == "containers" and state.selected_container_id or state.selected_item_id
-  local index = 1
-  for i, node in ipairs(list) do
-    if node.id == current then
-      index = i
-      break
-    end
+  local current = self:selected_index(kind) or 1
+  local target = math.max(1, math.min(#list, current + delta))
+  if target == current then
+    return
   end
-  index = math.max(1, math.min(#list, index + delta))
-  local id = list[index].id
   if kind == "containers" then
-    self:select_container(id)
-    self:focus_cursor("containers")
+    self:select_container(list[target].id)
   else
-    self:select_item(id)
-    self:focus_cursor("items")
+    self:select_item(list[target].id)
+  end
+end
+
+---The sidebar motions. The list cursor is card data, so the familiar keys are
+---bound instead of inherited: `j`/`k` (with counts), `gg`/`G`, and a half-page
+---`<C-d>`/`<C-u>`; the selection bar follows, the window scroll follows it.
+---@param key string
+function M:action_move(key)
+  local state = self.state
+  local kind = state.card_focus
+  local list = kind == "containers" and state.containers or state.items
+  if #list == 0 then
+    return
+  end
+  local count = math.max(1, vim.v.count1)
+  local current = self:selected_index(kind) or 1
+  local target
+  if key == "gg" then
+    target = count
+  elseif key == "G" then
+    target = count > 1 and count or #list
+  elseif key == "<C-d>" then
+    target = current + math.max(1, math.floor(self:view_height(kind) / 2)) * count
+  elseif key == "<C-u>" then
+    target = current - math.max(1, math.floor(self:view_height(kind) / 2)) * count
+  elseif key == "k" then
+    target = current - count
+  else
+    target = current + count
+  end
+  target = math.max(1, math.min(#list, target))
+  if target == current then
+    return
+  end
+  if kind == "containers" then
+    self:select_container(list[target].id)
+  else
+    self:select_item(list[target].id)
   end
 end
 
@@ -1702,7 +1677,6 @@ function M:action_switch(key)
     return
   end
   self:select_item(node.id)
-  self:focus_cursor("items")
   self:set_focus("terminal")
 end
 
@@ -1766,7 +1740,12 @@ function M:show_help()
     end
   end
 
-  local width, height = 46, #lines + 2
+  local content = 0
+  for _, line in ipairs(lines) do
+    content = math.max(content, fn.strdisplaywidth(line))
+  end
+  local width = math.max(46, math.min(content + 4, vim.o.columns - 4))
+  local height = #lines + 2
   local buf = scratch("cinder_terminal_help")
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -1800,8 +1779,10 @@ function M:show_help()
     if api.nvim_win_is_valid(win) then
       pcall(api.nvim_win_close, win, true)
     end
-    if self:is_open() and valid_win(self.state.win[self.state.focus] or -1) then
-      api.nvim_set_current_win(self.state.win[self.state.focus])
+    local state = self.state
+    local target = state.focus == "terminal" and state.win.terminal or state.win.app
+    if self:is_open() and valid_win(target) then
+      api.nvim_set_current_win(target)
     end
   end
   for _, key in ipairs({ "q", "<Esc>", "?" }) do
@@ -1824,11 +1805,52 @@ function M:map(buf, mode, lhs, rhs, desc)
 end
 
 function M:map_buffers()
-  local state = self.state
-  for _, panel in ipairs(PANELS) do
-    self:map_surface(state.buf[panel], "n", interaction.bindings("sidebar", panel, self:resolver()))
+  self:map_sidebar()
+  self:map_surface(self.state.buf.hint, "n", interaction.bindings("pane", nil, self:resolver()))
+end
+
+---One buffer serves both sidebar cards, so a key is resolved against the
+---panel that has the cursor *when it is pressed*: the union of the two panels
+---is mapped, and a key only one panel knows is inert in the other.
+function M:map_sidebar()
+  local buf = self.state.buf.app
+  if not valid_buf(buf) then
+    return
   end
-  self:map_surface(state.buf.hint, "n", interaction.bindings("pane", nil, self:resolver()))
+  local mapped = {}
+  for _, panel in ipairs(SIDEBAR_PANELS) do
+    for _, binding in ipairs(interaction.bindings("sidebar", panel, self:resolver())) do
+      if not mapped[binding.lhs] then
+        mapped[binding.lhs] = true
+        self:map(buf, "n", binding.lhs, function()
+          self:run_sidebar(binding.lhs)
+        end, binding.action.summary or binding.action.name)
+      end
+    end
+  end
+end
+
+---@param lhs string
+function M:run_sidebar(lhs)
+  for _, binding in ipairs(interaction.bindings("sidebar", self.state.card_focus, self:resolver())) do
+    if binding.lhs == lhs then
+      self:invoke(binding)
+      return
+    end
+  end
+end
+
+---@param binding CinderTerminal.Interaction.Binding
+function M:invoke(binding)
+  local action = binding.action
+  if binding.run then
+    binding.run(self, binding.gesture)
+  elseif action.rhs then
+    local keys = api.nvim_replace_termcodes(action.rhs, true, false, true)
+    pcall(api.nvim_feedkeys, keys, "n", false)
+  else
+    action.run(self, binding.gesture)
+  end
 end
 
 ---@return fun(option: string, defaults: string[]): string[]
@@ -1847,19 +1869,15 @@ end
 function M:map_surface(buf, mode, bindings)
   for _, binding in ipairs(bindings) do
     local action = binding.action
-    local rhs
-    if binding.run then
-      rhs = function()
-        binding.run(self, binding.gesture)
-      end
-    elseif action.rhs then
-      rhs = action.rhs
+    if not binding.run and action.rhs then
+      -- Keep the key sequence a mapping, the way Neovim's own `<C-\><C-n>`
+      -- does: it must not wait for another key and shows up as `rhs`.
+      self:map(buf, mode, binding.lhs, action.rhs, action.summary or action.name)
     else
-      rhs = function()
-        action.run(self, binding.gesture)
-      end
+      self:map(buf, mode, binding.lhs, function()
+        self:invoke(binding)
+      end, action.summary or action.name)
     end
-    self:map(buf, mode, binding.lhs, rhs, action.summary or action.name)
   end
 end
 

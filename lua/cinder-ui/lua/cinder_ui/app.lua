@@ -38,9 +38,34 @@ function App:_dims()
   local cols, lines = vim.o.columns, vim.o.lines
   local w = math.min(axis_size(self.width, cols), cols)
   local h = math.min(axis_size(self.height, lines), lines)
-  local row = math.max(0, math.floor((lines - h) / 2))
-  local col = math.max(0, math.floor((cols - w) / 2))
+  local row = self.opts.row
+  if row == nil then
+    row = math.max(0, math.floor((lines - h) / 2))
+  end
+  local col = self.opts.col
+  if col == nil then
+    col = math.max(0, math.floor((cols - w) / 2))
+  end
   return w, h, row, col
+end
+
+-- Move/resize an open app from the plugin's own layout math. `o` =
+-- { width?, height?, row?, col? }; a nil field keeps the current value.
+function App:set_geometry(o)
+  o = o or {}
+  if o.width ~= nil then
+    self.width = o.width
+  end
+  if o.height ~= nil then
+    self.height = o.height
+  end
+  if o.row ~= nil then
+    self.opts.row = o.row
+  end
+  if o.col ~= nil then
+    self.opts.col = o.col
+  end
+  self:resize()
 end
 
 function App:_open()

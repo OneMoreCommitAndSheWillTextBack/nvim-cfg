@@ -106,6 +106,34 @@ local function apply_overrides(overrides)
   end
 end
 
+---Card groups cinder-ui draws with, derived from the semantic groups above so
+---the cards wear the colorscheme instead of a palette of their own. cinder-ui
+---derives a per-row variant from `CinderUiCursor`, hence the background.
+local function apply_card_theme()
+  local border = resolved(M.groups.border)
+  local title = resolved(M.groups.title)
+  local cursor = resolved(M.groups.selected)
+
+  vim.api.nvim_set_hl(0, "CinderUiBorder", border.fg and { fg = border.fg } or { link = M.groups.border })
+  vim.api.nvim_set_hl(
+    0,
+    "CinderUiBorderFocus",
+    title.fg and { fg = title.fg, bold = title.bold } or { link = M.groups.title }
+  )
+  vim.api.nvim_set_hl(0, "CinderUiTitle", { link = M.groups.title })
+  vim.api.nvim_set_hl(0, "CinderUiTag", { link = M.groups.mark })
+  vim.api.nvim_set_hl(0, "CinderUiDim", { link = M.groups.detail })
+  vim.api.nvim_set_hl(0, "CinderUiScrollbar", { link = M.groups.title })
+  vim.api.nvim_set_hl(0, "CinderUiCursor", cursor.bg and { bg = cursor.bg } or { link = M.groups.selected })
+
+  -- cinder-ui caches the highlight variants it derives per row; a new
+  -- colorscheme has to drop them or the selection bar keeps the old colors.
+  -- `setup()` only applies defaults, so the groups set just above survive.
+  pcall(function()
+    require("cinder_ui.theme").setup()
+  end)
+end
+
 --- Rebuild the CinderTerminal highlight layer for the active colorscheme.
 --- The current theme callback wins over user overrides, which win over the
 --- plugin defaults.
@@ -117,6 +145,7 @@ function M.refresh_terminal_theme()
   if callback then
     callback(M.groups)
   end
+  apply_card_theme()
 end
 
 ---@param name string Colorscheme name, such as `everforest`.

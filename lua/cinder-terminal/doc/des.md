@@ -27,38 +27,47 @@ D  build-01               ← 以后扩展 docker
 ## 2. 面板与焦点
 
 ```text
-root frame（唯一的外边框，focusable = false，zindex 40）
-├── containers 面板  左上，rows 0..divider-1
-├── items 面板       左下，rows divider+1..body-1
-├── terminal 面板    右侧，整列，rows 0..body-1
-└── help row         root buffer 的最后一行
+cinder-ui app（唯一的外浮窗，zindex 40；外边框由 App 画）
+└── root card（column）
+    ├── row（flex 1）
+    │   ├── column（width = sidebar_width）
+    │   │   ├── containers card（height = container_rows，list body）
+    │   │   └── items card（height = flex 1，list body）
+    │   └── terminal card（width = flex 1，text body）
+    └── hint card（height = 1，border = false）
 ```
 
-- 区域坐标全部由 `layout.compute()` 一次算出（`lua/cinder_terminal/layout.lua`），
-  面板是 relative = "win" 的子浮窗，外边框由 Neovim 画在 frame 之外，
-  所以布局公式里没有边框格。
-- 顶栏不用独立窗口：category 行是 containers 列表的一部分。
-- 分隔符与 help 行由 frame buffer 绘制，只有 frame 拥有真正的 border。
+- 布局数字仍然全部由 `layout.compute()` 一次算出（`lua/cinder_terminal/layout.lua`）：
+  frame 的位置与宽高、侧栏宽度、container 卡的高度。cinder-ui 负责把卡片树
+  排版、画进 app buffer，`App:set_geometry()` 在 `VimResized` 时接收新的 frame。
+- 卡片自带圆角边框与标题：侧栏两张卡上下相接、和右栏左右相接，卡片自己的边框
+  就是分隔符，`layout.lua` 里不再有 divider 行；`BORDER = 2` 是唯一的常量来源。
+- 顶栏不用独立窗口，也不用 winbar：标题是卡片的 `title`，`containers` 卡里
+  直接列 category 行。
 - 焦点有三个位置：`containers` / `items` / `terminal`，但 `<Tab>` **不是**在三者
   之间轮转，而是在「侧栏」和「右栏」之间**交换**：侧栏任何一栏按 `<Tab>` 都把
   键盘交给终端，在终端里按 `<Tab>` 回到 shell 列表。容器面板刻意不在循环里 ——
   终端几乎总是在「已经选中的容器」的列表里挑的，让 `<Tab>` 先停一次树根，等于
   每次切换都要多按一次。树本身用 `h`（上一层）和 `l`（打开，下一层）走，
   提示行按当前所处的面写清楚 `<Tab>` 会去哪（`[Tab] terminal` / `[Tab] items`）。
-- 聚焦的面板：标题用 `title` 高亮、相邻分隔符段变亮、cursorline 用 `selected`；
-  失焦的面板标题降到 `title_inactive`、cursorline 用 `selected_inactive`。
-  这就是 lazygit「活动面板边框发亮」的等价实现。
+- 聚焦的面板就是 cinder-ui 的 focused card：边框与标题用 `CinderUiBorderFocus` /
+  `CinderUiTitle` 画亮，失焦的卡片用 `CinderUiBorder` / `CinderUiDim`。
+  `highlights.apply_card_theme()` 把 `CinderTerminal.*` 映射到这些分组，
+  所以 lazygit 式「活动面板边框发亮」的观感不变，用户主题也只需写一套。
 - `selected_inactive` 默认由 `CursorLine` 与 `Normal` 的背景按 55% 混合算出
-  （`highlights.apply_inactive_cursorline()`），所以默认主题下「哪个面板有
-  光标」也看得见；主题适配器仍然可以覆盖它。
-- Neovim 0.12 没有 `CursorLineNC` 分组，失焦面板直接用 `winhighlight` 把
-  `CursorLine` 映射到 `selected_inactive`。
+  （`highlights.apply_inactive_cursorline()`），用于列表里的非活动行；
+  cinder-ui 的选中行（`CinderUiCursor`）则映射自 `selected`。
 
-## 3. 面板里的光标
+## 3. 列表里的光标
 
-列表是真正的 buffer，`j/k`、`gg/G`、`<C-d>/<C-u>`、`zz`、`/` 都是原生行为；
-选择 = 光标位置的派生值（`CursorMoved` → 选中 id），不是插件自绘的选中态。
-刷新时按 id 还原光标，所以轮询不会打断操作。
+列表是**卡片数据**，不是 buffer 光标：每张 list 卡渲染自己的 `items`/`cursor`/`top`，
+选择是 `state.selected_container_id` / `selected_item_id` 的派生值，滚动位置存在
+`state.scroll`，两者都由 `render()` 重画。`j/k`（带 count）、`gg/G`、
+`<C-d>/<C-u>` 由 `interaction` 的 `move` 动作实现，滚动跟随选择
+（`cinder_ui.ensure_visible`）。侧栏两张卡共用一个 buffer，所以键位在按下的
+那一刻按 `state.card_focus` 分派（`run_sidebar`）—— 同一个 `d` 在两张卡里
+各自解释，也各自检查 provider 能力。刷新时按 id 还原选择，所以轮询不会打断
+操作。
 
 ## 4. Provider 契约
 
@@ -115,8 +124,8 @@ buffer 被删除」的窗口 —— 所以 kill/restart 当前显示的终端时
    buffer（`bufhidden = hide`，否则它自己会被 wipe 掉，切换直接失败）；
 3. 之后再让 provider 删旧 buffer。
 
-`WinClosed` 兜底：任何面板窗口意外消失（`:q`、`:bd`、外部关闭）时隐藏整个
-工作区，而不是留下半死状态。tmux client 每次 attach 都换一个新 buffer
+`WinClosed` 兜底：工作区的两个窗口之一（app 浮窗或终端窗口）意外消失
+（`:q`、`:bd`、外部关闭）时隐藏整个工作区，而不是留下半死状态。tmux client 每次 attach 都换一个新 buffer
 （`termopen` 拒绝复用 `buftype=terminal` 的 buffer），旧的在没人显示后由
 `snapshot` 的 sweep 回收。
 
@@ -153,17 +162,21 @@ client 再变小…… 实测 200x55 的界面几次重绘后塌成 35x1。所�
 - `kill()` 也拒绝（杀宿主 session 或 Neovim 所在的 pane 等于自杀），
   node 上带 `locked` 原因，UI 在弹确认框**之前**就提示，不消耗一次确认。
 
-### 6.5 面板高度与 frame 的 chrome
+### 6.5 卡片高度与终端窗口的贴合
 
 两个布局问题都会让「看不见」变成 bug：
 
-1. 左侧容器面板的高度由容器数量决定，但 `reflow()` 原先只在 `VimResized`
-   时调用 —— 工作区开着时新出现的 session 会被裁掉。现在
-   `apply_snapshot` 后调 `fit_panels()`，容器数量变化就重排。
-2. 每个面板都在自己的窗口里画一行 winbar（标题），所以「显示 n 行」需要
-   `n + 1` 行窗口；`layout.compute` 用 `TITLE_ROWS` 统一留出这一行。
-   frame 窗口是背景，不能有 winbar —— 否则它的 49 行内容挤进 48 行，
-   最后一行（帮助行：按键提示与 `notify` 消息）永远不会显示。
+1. 左侧 containers 卡的高度由容器数量决定，而 `render()` 每次都重新
+   `dimensions()`，所以工作区开着时新出现的 session 不会被裁掉；
+   items 卡吃掉剩下的高度（`ui.flex(1)`）。
+2. 卡片标题画在边框那一行上，所以「显示 n 行」需要 `n + 2` 行卡片
+   （上下边框各一），`view_height()` 因此减 `CARD_BORDER`；hint 卡
+   `border = false`、高 1 行，`notify` 消息和按键提示都写在它里面，
+   不会再被挤掉。
+3. 终端卡只是 chrome：真正的 terminal window 由 `sync_terminal_window()`
+   用 `nvim_win_set_config`（relative = "win"，win = app，zindex 45）贴在
+   卡片的 inner rect 上，所以圆角边框和标题始终围着 job，而按键仍然落在
+   原生 terminal buffer 里。
 
 ### 6.6 两种模式：terminal mode 属于 job，normal mode 属于 Neovim
 
@@ -183,8 +196,12 @@ client 再变小…… 实测 200x55 的界面几次重绘后塌成 35x1。所�
   恰好是 TUI 最常用的键。所以这里绑的是**单个 `<Esc>`**：按下即把字节转给
   job，只有 `escape_window`（默认 300ms）内的第二次按下才算手势（`translate`
   字段 + `ui:terminal_escape()`）。单个 `<Esc>` 因此零延迟，也和 'timeoutlen'
-  彻底脱钩。要改逃生键照旧用 `keymaps.terminal_normal`：字符串、列表或 `false`
-  （`false` 只剩 Neovim 自己的两键序列）。
+  彻底脱钩。代价是明确且必须知道的：手势会真的把**一个** `<Esc>` 送进 job，
+  而 readline/emacs 这类把 `<Esc>` 当前缀的程序会把它读成 Meta，作用在下一个
+  按键上（"回来以后第一个键被吃"）。要求 job 一个 `<Esc>` 都不看到时用
+  `<C-\>`：它由 Neovim 消费，完全不下发。要改逃生键照旧用
+  `keymaps.terminal_normal`：字符串、列表或 `false`（`false` 只剩 Neovim
+  自己的两键序列）。
 
 provider 是异步 attach 的，`set_focus("terminal", { insert = true })` 往往
 跑在真实 terminal buffer 换入之前；所以 `set_terminal_buffer` 在「占位
@@ -193,9 +210,9 @@ buffer 换成 terminal buffer、且这次进入的意图是 insert」时补一�
 用户以为在打字，按键却当成 normal 命令执行 —— 这是「terminal 吞键」的
 另一半来源。用户已经在 normal mode 里看过的 pane 不会被重新插回 insert。
 
-两种模式下面板长得一模一样，所以状态放在 chrome 上：normal 时右栏标题追加
-`normal`，帮助行切到当前模式真正生效的键。`ModeChanged` 里同时刷新 winbar
-和帮助行。标题里的标记是跟 buffer 走的：`state.terminal_insert` 记录 pane
+两种模式下面板长得一模一样，所以状态放在 chrome 上：normal 时右栏卡片的标题
+追加 `normal`（`terminal_title()` 会先按卡片宽度截断名字，保证标记不被裁掉），
+帮助行切到当前模式真正生效的键。`ModeChanged` 里同时重画卡片和帮助行。标题里的标记是跟 buffer 走的：`state.terminal_insert` 记录 pane
 自己的模式，所以光标移到列表后标记不会消失（`pane_normal_mode()`），而
 帮助行仍然只看焦点（`terminal_normal_mode()`），它描述的是「现在按键去哪」。
 
@@ -238,6 +255,12 @@ CinderTerminal.Help / Mark / Detail / Error
 
 前五个与合并前同名，`plugins/theme/*.lua` 里的适配器不用改。
 
+`refresh_terminal_theme()` 末尾还会调用 `apply_card_theme()`，把
+`CinderTerminal.Border/Title/TitleInactive/Selected/SelectedInactive/Mark/Detail/Help`
+映射到 cinder-ui 的 `CinderUiBorder/BorderFocus/Title/Dim/Cursor/Scrollbar/...`，
+并用 `require("cinder_ui.theme").setup()` 清掉变体缓存。因此卡片库不需要
+自己的一套主题入口：用户和 colorscheme 适配器只写 `CinderTerminal.*`。
+
 ## 8. 有意不做的事
 
 - **pane 不进侧栏**：右栏里的窗口/终端切换由 `<C-b>` 回列表再按数字完成，
@@ -245,5 +268,6 @@ CinderTerminal.Help / Mark / Detail / Error
 - **不做 `preview` 模式**：合并前 `tmux-manager` 的 `capture-pane` 只读预览
   没有迁移过来；如果以后需要，可以作为 `providers.tmux.mode = "preview"`
   加回，不影响现在的面板结构。
-- **不做第三方 UI 依赖**：浮窗、边框、help 行全部用 `nvim_open_win` 与
-  buffer 自绘。
+- **UI 依赖只有同仓库的 cinder-ui**：浮窗、边框、标题、列表和 hint 行都由
+  `lua/cinder-ui` 的卡片库画进一个 app buffer；终端本身仍然是原生
+  `termopen`/`nvim_open_win` 窗口，没有被重绘。

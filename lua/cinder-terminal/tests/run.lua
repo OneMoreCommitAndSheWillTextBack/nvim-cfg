@@ -1,7 +1,9 @@
 -- Headless tests: nvim --headless -u NONE -i NONE -l tests/run.lua
 local source = debug.getinfo(1, "S").source:sub(2)
-local plugin_root = vim.fn.fnamemodify(source, ":h:h")
+local plugin_root = vim.fn.fnamemodify(source, ":p:h:h")
 vim.opt.rtp:prepend(plugin_root)
+-- The workspace is drawn with the sibling cinder-ui library.
+vim.opt.rtp:prepend(vim.fn.fnamemodify(plugin_root, ":h") .. "/cinder-ui")
 
 local api = vim.api
 
@@ -34,9 +36,27 @@ local function truthy(value, message)
   end
 end
 
+---Content lines of one card, straight out of the app buffer: cinder-ui writes
+---one buffer line per canvas row, so a card's inner rectangle is also its
+---text rectangle.
+---@param workspace table
+---@param id string
+---@return string[]
+local function card_lines(workspace, id)
+  local placement = workspace.state.app:placement(id)
+  truthy(placement ~= nil, "card " .. id .. " is placed")
+  local inner = placement.inner
+  local lines = api.nvim_buf_get_lines(workspace.state.buf.app, inner.row - 1, inner.row - 1 + inner.height, false)
+  local out = {}
+  for index, line in ipairs(lines) do
+    out[index] = vim.fn.strcharpart(line, inner.col - 1, inner.width)
+  end
+  return out
+end
+
 -- Layout -------------------------------------------------------------------
 
-run_case("layout splits the frame without gaps", function()
+run_case("layout tiles the frame into cards", function()
   local d = layout.compute({
     columns = 200,
     lines = 60,
@@ -47,29 +67,30 @@ run_case("layout splits the frame without gaps", function()
     container_rows = 4,
   })
   eq(d.frame.width, 180, "frame width")
-  truthy(d.separator_col + 1 + d.terminal.width == d.inner_width, "separator plus terminal fills the frame")
-  eq(d.containers.width, d.separator_col, "containers share the separator column")
-  eq(d.items.width, d.separator_col, "items share the separator column")
-  eq(d.items.row, d.divider_row + 1, "items start below the divider")
-  eq(d.help_row, d.inner_height - 1, "help row is the last inner row")
-  truthy(d.terminal.height == d.body_height, "terminal spans the body")
-  truthy(d.items.height + d.containers.height + 1 == d.body_height, "left column rows add up")
+  eq(d.frame.height, 50, "frame height")
+  eq(d.sidebar_width + d.terminal_width, d.inner_width, "sidebar and terminal fill the frame")
+  eq(d.body_height + 1, d.inner_height, "the hint card owns one row")
+  eq(d.container_rows, 6, "four containers plus the two border rows")
+  eq(d.items_rows, d.body_height - d.container_rows, "items take the rest of the column")
+  eq(d.hint_row, d.inner_height - 1, "hint card is the last inner row")
 end)
 
-run_case("layout keeps both panels usable in a small window", function()
+run_case("layout keeps every card usable in a small window", function()
   local d = layout.compute({
     columns = 60,
-    lines = 14,
+    lines = 18,
     cmdheight = 0,
     width = 0.9,
-    height = 0.86,
+    height = 0.9,
     left_ratio = 0.3,
     container_rows = 12,
   })
-  truthy(d.containers.height >= 3, "containers keep at least three rows")
-  truthy(d.items.height >= 2, "items keep at least two rows")
-  truthy(d.terminal.width >= 20, "terminal keeps a usable width")
+  truthy(d.container_rows >= 2, "containers keep at least their border")
+  truthy(d.items_rows >= 2, "items keep at least their border")
+  truthy(d.sidebar_width >= 24, "sidebar keeps a usable width")
+  truthy(d.terminal_width >= 25, "terminal keeps a usable width")
   truthy(d.frame.row >= 0 and d.frame.col >= 0, "frame stays on screen")
+  eq(d.sidebar_width + d.terminal_width, d.inner_width, "cards still tile the frame")
 end)
 
 -- tmux parsing -------------------------------------------------------------
@@ -278,8 +299,19 @@ run_case("workspace renders containers, items and terminal", function()
     "terminal pane shows the session buffer"
   )
 
-  local text = table.concat(api.nvim_buf_get_lines(workspace.state.buf.containers, 0, -1, false), "\n")
-  truthy(text:find("local", 1, true) ~= nil, "containers panel lists the local container")
+  eq(vim.bo[workspace.state.buf.app].filetype, "cinderui", "the workspace buffer is the cinder-ui canvas")
+  local text = table.concat(card_lines(workspace, "containers"), "\n")
+  truthy(text:find("local", 1, true) ~= nil, "containers card lists the local container")
+
+  -- The terminal card is chrome: the real pane window sits exactly on its
+  -- content area so the job keeps Neovim's native keys.
+  local placement = workspace.state.app:placement("terminal")
+  local config = api.nvim_win_get_config(workspace.state.win.terminal)
+  eq(config.relative, "win", "the pane is anchored to the workspace float")
+  eq(config.row, placement.inner.row - 1, "the pane starts on the card content")
+  eq(config.col, placement.inner.col - 1, "and at the card's column")
+  eq(config.width, placement.inner.width, "the pane is as wide as the card content")
+  eq(config.height, placement.inner.height, "the pane is as tall as the card content")
 
   workspace:close()
   truthy(not workspace:is_open(), "workspace is closed")
@@ -488,7 +520,7 @@ end)
 
 run_case("closing a workspace window hides the workspace", function()
   local workspace, local_provider = make_workspace()
-  api.nvim_win_close(workspace.state.win.items, true)
+  api.nvim_win_close(workspace.state.win.app, true)
   truthy(
     wait_for(1000, function()
       return workspace.state.opened == false
@@ -539,29 +571,35 @@ run_case("a tmux client buffer is never reused for a new job", function()
   end
 end)
 
-run_case("panels dim their cursorline when they lose focus", function()
+run_case("the focused card carries the focus border", function()
   local workspace, local_provider = make_workspace()
-  local groups = require("cinder_terminal.highlights").groups
+
+  ---Highlight of a card's top-left corner, read from the canvas extmarks.
+  ---@param id string
+  ---@return string?
+  local function border_hl(id)
+    local placement = workspace.state.app:placement(id)
+    local row, col = placement.rect.row - 1, placement.rect.col - 1
+    for _, extmark in
+      ipairs(api.nvim_buf_get_extmarks(workspace.state.buf.app, workspace.state.app.ns, { row, col }, { row, col }, {
+        details = true,
+      }))
+    do
+      for _, span in ipairs(extmark[4].virt_text or {}) do
+        if span[2] then
+          return span[2]
+        end
+      end
+    end
+  end
 
   workspace:set_focus("containers")
-  truthy(
-    vim.wo[workspace.state.win.containers].winhighlight:find("CursorLine:" .. groups.selected, 1, true) ~= nil,
-    "focused panel uses the selected group"
-  )
-  truthy(
-    vim.wo[workspace.state.win.items].winhighlight:find("CursorLine:" .. groups.selected_inactive, 1, true) ~= nil,
-    "unfocused panel uses the inactive group"
-  )
-  truthy(
-    vim.wo[workspace.state.win.containers].winhighlight:find("CursorLineNC", 1, true) == nil,
-    "CursorLineNC is not used: the group does not exist"
-  )
+  eq(border_hl("containers"), "CinderUiBorderFocus", "the focused card border glows")
+  eq(border_hl("items"), "CinderUiBorder", "the unfocused card keeps the plain border")
 
   workspace:set_focus("items")
-  truthy(
-    vim.wo[workspace.state.win.items].winhighlight:find("CursorLine:" .. groups.selected, 1, true) ~= nil,
-    "focus moved to the items panel"
-  )
+  eq(border_hl("items"), "CinderUiBorderFocus", "focus moved to the items card")
+  eq(border_hl("containers"), "CinderUiBorder", "and left the containers card")
 
   workspace:close()
   local_provider:close()
@@ -578,7 +616,7 @@ run_case("tmux adopts the socket of the surrounding server", function()
   vim.env.TMUX = previous
 end)
 
-run_case("the containers panel leaves room for its title", function()
+run_case("the containers card leaves room for its border", function()
   local d = layout.compute({
     columns = 200,
     lines = 60,
@@ -588,8 +626,8 @@ run_case("the containers panel leaves room for its title", function()
     left_ratio = 0.3,
     container_rows = 6,
   })
-  eq(d.containers.height, 7, "six containers plus the one-row title")
-  truthy(d.items.height - 1 >= 4, "items keep four entries below their title")
+  eq(d.container_rows, 8, "six containers plus the two border rows")
+  truthy(d.items_rows - 2 >= 4, "items keep four entries below their border")
 end)
 
 ---@param id string
@@ -643,7 +681,7 @@ run_case("the containers panel grows and shrinks with the container list", funct
   workspace:open()
   workspace:refresh(true)
   eq(#workspace.state.containers, 2, "two containers")
-  eq(api.nvim_win_get_height(workspace.state.win.containers), 3, "the panel shows two containers below its title")
+  eq(workspace.state.app:placement("containers").rect.height, 4, "the card shows two containers below its border")
 
   for i = 3, 8 do
     containers[#containers + 1] = stub_container("stub:" .. i, "c" .. i)
@@ -651,15 +689,15 @@ run_case("the containers panel grows and shrinks with the container list", funct
   workspace:refresh(true)
   eq(#workspace.state.containers, 8, "eight containers")
   eq(
-    api.nvim_win_get_height(workspace.state.win.containers),
-    9,
-    "the panel grew instead of clipping the new containers"
+    workspace.state.app:placement("containers").rect.height,
+    10,
+    "the card grew instead of clipping the new containers"
   )
 
   containers = { containers[1] }
   workspace:set_providers({ stub_provider(containers) })
   workspace:refresh(true)
-  eq(api.nvim_win_get_height(workspace.state.win.containers), 3, "the panel shrinks again")
+  eq(workspace.state.app:placement("containers").rect.height, 3, "the card shrinks again")
 
   workspace:close()
 end)
@@ -786,7 +824,7 @@ run_case("digits switch terminals from the list", function()
 
   -- The row wears the digit that reaches it, and only the ten a single digit
   -- can address wear one.
-  local rows = api.nvim_buf_get_lines(workspace.state.buf.items, 0, -1, false)
+  local rows = card_lines(workspace, "items")
   for index = 1, 10 do
     local want = (index % 10) .. " "
     eq(rows[index]:sub(1, 2), want, "row " .. index .. " wears its digit")
@@ -796,9 +834,10 @@ run_case("digits switch terminals from the list", function()
   workspace:action_switch("3")
   eq(workspace.state.focus, "terminal", "the digit hands the keyboard to the pane")
   eq(workspace:selected_item().id, "stub:c3", "and selects the third terminal")
-  eq(api.nvim_win_get_cursor(workspace.state.win.items)[1], 3, "the list cursor follows the jump")
 
   workspace:set_focus("items")
+  local inner = workspace.state.app:placement("items").inner
+  eq(api.nvim_win_get_cursor(workspace.state.win.app)[1], inner.row + 2, "the cursor follows the jump")
   workspace:action_switch("0")
   eq(workspace:selected_item().id, "stub:c10", "0 is the tenth terminal")
 
@@ -1017,9 +1056,9 @@ run_case("the hint row only names keys that are really bound", function()
   end
 
   workspace:set_focus("containers")
-  check("the containers panel", "sidebar", "containers", "n", workspace.state.buf.containers)
+  check("the containers panel", "sidebar", "containers", "n", workspace.state.buf.app)
   workspace:set_focus("items")
-  check("the items panel", "sidebar", "items", "n", workspace.state.buf.items)
+  check("the items panel", "sidebar", "items", "n", workspace.state.buf.app)
 
   local real_mode = api.nvim_get_mode
   local function with_mode(mode, fn)
@@ -1090,7 +1129,8 @@ run_case("the pane keeps its mode marker while another panel has focus", functio
   )
 
   local function title()
-    return vim.wo[workspace.state.win.terminal].winbar
+    local placement = workspace.state.app:placement("terminal")
+    return api.nvim_buf_get_lines(workspace.state.buf.app, placement.rect.row - 1, placement.rect.row, false)[1]
   end
   eq(title():find("normal", 1, true), nil, "typing shows no normal marker")
 
@@ -1161,22 +1201,17 @@ run_case("the hint row follows the pane mode", function()
   local_provider:close()
 end)
 
-run_case("the workspace keeps its help row inside the frame", function()
+run_case("the workspace keeps its hint card inside the frame", function()
   local workspace, local_provider = make_workspace()
   local d = workspace:dimensions()
-  eq(vim.wo[workspace.state.win.frame].winbar, "", "the frame window has no winbar")
   eq(
-    api.nvim_win_get_height(workspace.state.win.frame),
+    api.nvim_win_get_height(workspace.state.win.app),
     d.inner_height,
-    "the frame window is as tall as the layout says"
+    "the workspace float is as tall as the layout says"
   )
-  eq(
-    api.nvim_buf_line_count(workspace.state.buf.frame),
-    d.inner_height,
-    "every frame row has a buffer line, help included"
-  )
-  local help = api.nvim_buf_get_lines(workspace.state.buf.frame, d.help_row, d.help_row + 1, false)[1]
-  truthy(help and help:find("%[", 1) ~= nil, "the help row lists the contextual keys")
+  local lines = api.nvim_buf_get_lines(workspace.state.buf.app, 0, -1, false)
+  eq(#lines, d.inner_height, "every canvas row has a buffer line, hint included")
+  truthy(lines[d.hint_row + 1]:find("%[", 1) ~= nil, "the hint row lists the contextual keys")
 
   workspace:close()
   local_provider:close()

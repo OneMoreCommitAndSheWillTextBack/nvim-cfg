@@ -69,11 +69,17 @@ M.actions = {
   -- Sidebar: containers and items ------------------------------------------
   {
     name = "move",
+    option = "move",
+    keys = { "j", "k", "gg", "G", "<C-d>", "<C-u>" },
     label = "j/k",
+    help_label = "j/k, gg/G, C-d/C-u",
     desc = "move",
-    help_desc = "move (native motions, `gg`/`G` work)",
+    help_desc = "move (counts, `gg`/`G`, `<C-d>`/`<C-u>`)",
+    summary = "Move",
     surfaces = { "sidebar" },
-    native = true,
+    run = function(ui, key)
+      ui:action_move(key)
+    end,
   },
   {
     name = "open",

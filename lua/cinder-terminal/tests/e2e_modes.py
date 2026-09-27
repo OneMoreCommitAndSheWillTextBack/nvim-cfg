@@ -34,6 +34,8 @@ import termios
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The workspace is drawn with the sibling cinder-ui library.
+UI_ROOT = os.path.join(os.path.dirname(ROOT), "cinder-ui")
 
 MODE_LOG = "mode.log"
 YANK_LOG = "yank.log"
@@ -45,6 +47,7 @@ ROWS, COLUMNS = 40, 140
 
 PROBE = """\
 vim.opt.rtp:prepend([[{root}]])
+vim.opt.rtp:prepend([[{ui_root}]])
 local term = require("cinder_terminal")
 term.setup({{
   refresh_interval = 0,
@@ -78,8 +81,8 @@ vim.api.nvim_create_autocmd("TextYankPost", {{
 }})
 
 -- What the tests read instead of scraping the screen: the job's own output,
--- the hint row (the last line of every non-terminal buffer), the winbars and
--- where the pane is scrolled.
+-- the hint row (the last line of every non-terminal buffer), the card canvas
+-- (every line of the cinderui buffer) and where the pane is scrolled.
 local function poll()
   local parts = {{}}
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -88,6 +91,11 @@ local function poll()
       if vim.bo[buf].buftype == "terminal" then
         vim.list_extend(parts, lines)
       else
+        if vim.bo[buf].filetype == "cinderui" then
+          for _, line in ipairs(lines) do
+            parts[#parts + 1] = "CARD " .. line
+          end
+        end
         for i = #lines, 1, -1 do
           if lines[i]:match("%S") then
             parts[#parts + 1] = lines[i]
@@ -99,7 +107,6 @@ local function poll()
   end
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     local buf = vim.api.nvim_win_get_buf(win)
-    parts[#parts + 1] = "WINBAR " .. (vim.wo[win].winbar or "")
     if vim.bo[buf].buftype == "terminal" then
       parts[#parts + 1] = string.format(
         "PANE mode=%s line=%d top=%d lines=%d",
@@ -161,6 +168,7 @@ class Pane:
             handle.write(
                 PROBE.format(
                     root=ROOT,
+                    ui_root=UI_ROOT,
                     mode=self.mode_path,
                     yank=self.yank_path,
                     pane=self.pane_path,
@@ -239,7 +247,7 @@ class Pane:
         return self._lines(self.yank_path)
 
     def screen(self):
-        """Job output, hint rows, winbars and pane positions."""
+        """Job output, hint rows, card canvas and pane positions."""
         return "\n".join(self._lines(self.pane_path))
 
     def pane(self):
@@ -253,8 +261,8 @@ class Pane:
                     fields[name] = value
         return fields
 
-    def winbars(self):
-        return [line for line in self._lines(self.pane_path) if line.startswith("WINBAR ")]
+    def cards(self):
+        return [line for line in self._lines(self.pane_path) if line.startswith("CARD ")]
 
     def wait_state(self, mode, timeout=6.0):
         deadline = time.time() + timeout
@@ -367,8 +375,8 @@ def check_modes(pane, report, drive, scrollback):
         require(pane.wait_screen("[Tab] items"), "normal mode does not offer the way back to the list")
         require("[q] items" not in pane.screen(), "the pane still spends q, which normal mode keeps")
         require(
-            any(" normal " in bar for bar in pane.winbars()),
-            "the pane title does not mark normal mode: %s" % pane.winbars(),
+            any("normal" in line for line in pane.cards()),
+            "the pane title does not mark normal mode: %s" % pane.cards(),
         )
         return "hint row and title follow the mode"
 
