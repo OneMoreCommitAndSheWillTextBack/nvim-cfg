@@ -107,9 +107,13 @@ Killing or restarting the terminal shown in the right panel never takes the
 workspace down with it: the pane is released before the old buffer goes away,
 and `WinClosed` hides the workspace instead of leaving half of it on screen if
 a panel window is closed from the outside. The workspace itself is a card tree
-(`lua/cinder_terminal/ui.lua` `build_tree()`): sidebar column, terminal card
-and a one-row hint card, redrawn into the app buffer on every change; only the
-terminal pane is a second, real window.
+(`lua/cinder_terminal/ui/render.lua` `build_tree()`): sidebar column, terminal
+card and a one-row hint card, redrawn into the app buffer on every change; only
+the terminal pane is a second, real window. The `ui/` directory splits the
+workspace by responsibility — `workspace.lua` (lifecycle and windows),
+`selection.lua`, `render.lua`, `terminal.lua` (pane modes and attach),
+`refresh.lua`, `actions.lua`, `keys.lua` (mapping) and `util.lua`; each module
+returns a method table that `init.lua` merges into `CinderTerminal.UI`.
 
 ## Commands
 

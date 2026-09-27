@@ -525,4 +525,24 @@ function M.help_rows(ctx, resolve)
   return rows
 end
 
+---Rows of the `?` popup for several contexts, in the order given and without
+---repeating a row more than one context produces: the pane in normal mode
+---shares keys with the pane in Terminal mode.
+---@param contexts CinderTerminal.Interaction.Context[]
+---@param resolve fun(option: string, defaults: string[]): string[]
+---@return { key: string, desc: string }[]
+function M.help_rows_for(contexts, resolve)
+  local rows, listed = {}, {}
+  for _, ctx in ipairs(contexts) do
+    for _, row in ipairs(M.help_rows(ctx, resolve)) do
+      local id = row.key .. "\0" .. row.desc
+      if not listed[id] then
+        listed[id] = true
+        rows[#rows + 1] = row
+      end
+    end
+  end
+  return rows
+end
+
 return M
