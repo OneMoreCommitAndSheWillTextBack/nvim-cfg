@@ -16,121 +16,112 @@ local function spec_of(child, axis)
   return { kind = "flex", weight = 1 }
 end
 
--- Distribute `avail` cells over size specs. Fixed sizes are honored, flex items share
--- the rest by weight (clamped by min/max). If everything does not fit, flexible items
--- are shrunk starting with the largest one.
-local function allocate(specs, avail)
-  local n = #specs
-  local sizes = {}
-  local fixed_sum = 0
-  local flex = {}
-  for i = 1, n do
-    if specs[i].kind == "fixed" then
-      sizes[i] = specs[i].size
-      fixed_sum = fixed_sum + sizes[i]
+---Fixed sizes are taken as given; everything else becomes a flex candidate.
+---@return table sizes Fixed entries filled in.
+---@return number[] flex Indices of the flex entries, in child order.
+---@return number fixed_sum
+local function split_fixed(specs)
+  local sizes, flex, fixed_sum = {}, {}, 0
+  for i, spec in ipairs(specs) do
+    if spec.kind == "fixed" then
+      sizes[i] = spec.size
+      fixed_sum = fixed_sum + spec.size
     else
       flex[#flex + 1] = i
     end
   end
+  return sizes, flex, fixed_sum
+end
 
-  local had_overflow = math.max(0, fixed_sum - avail)
-  local rem = math.max(0, avail - fixed_sum)
-
-  if #flex > 0 then
-    local active = {}
+---Hand `rem` cells to the flex entries by weight, freezing an entry at its
+---min/max as soon as its share breaks the bound. Freezing one entry frees
+---cells for the others, so the pass repeats until nothing freezes. Returns the
+---cells still unassigned (negative when the mins alone do not fit).
+---@param rem number
+---@return number rem
+local function share_flex(sizes, specs, flex, rem)
+  while true do
+    local wsum, frozen = 0, false
     for _, i in ipairs(flex) do
-      active[i] = true
-    end
-    while true do
-      local wsum, touched = 0, false
-      for _, i in ipairs(flex) do
-        if active[i] then
-          wsum = wsum + (specs[i].weight or 1)
-        end
-      end
-      if wsum <= 0 then
-        break
-      end
-      for _, i in ipairs(flex) do
-        if active[i] then
-          local s = specs[i]
-          local share = rem * (s.weight or 1) / wsum
-          if s.min and share < s.min - 1e-9 then
-            sizes[i] = s.min
-            rem = rem - s.min
-            active[i] = false
-            touched = true
-          elseif s.max and share > s.max + 1e-9 then
-            sizes[i] = s.max
-            rem = rem - s.max
-            active[i] = false
-            touched = true
-          end
-        end
-      end
-      if not touched or rem <= 0 then
-        break
-      end
-    end
-
-    local wsum, left = 0, rem
-    for _, i in ipairs(flex) do
-      if active[i] then
+      if sizes[i] == nil then
         wsum = wsum + (specs[i].weight or 1)
       end
     end
-    local fracs = {}
-    if wsum > 0 and left > 0 then
-      for _, i in ipairs(flex) do
-        if active[i] then
-          local exact = left * (specs[i].weight or 1) / wsum
-          local base = math.floor(exact)
-          sizes[i] = base
-          fracs[#fracs + 1] = { i = i, frac = exact - base }
-        end
-      end
-      local assigned = 0
-      for _, i in ipairs(flex) do
-        if active[i] then
-          assigned = assigned + (sizes[i] or 0)
-        end
-      end
-      local leftover = left - assigned
-      table.sort(fracs, function(a, b)
-        return a.frac > b.frac
-      end)
-      local k = 1
-      while leftover > 0 and #fracs > 0 do
-        local item = fracs[k]
-        local s = specs[item.i]
-        if s.max == nil or (sizes[item.i] or 0) < s.max then
-          sizes[item.i] = (sizes[item.i] or 0) + 1
-          leftover = leftover - 1
-        end
-        k = k + 1
-        if k > #fracs then
-          k = 1
-        end
-      end
+    if wsum <= 0 then
+      break
     end
     for _, i in ipairs(flex) do
       if sizes[i] == nil then
-        sizes[i] = 0
+        local spec = specs[i]
+        local share = rem * (spec.weight or 1) / wsum
+        if spec.min and share < spec.min - 1e-9 then
+          sizes[i] = spec.min
+          rem = rem - spec.min
+          frozen = true
+        elseif spec.max and share > spec.max + 1e-9 then
+          sizes[i] = spec.max
+          rem = rem - spec.max
+          frozen = true
+        end
+      end
+    end
+    if not frozen or rem <= 0 then
+      break
+    end
+  end
+  return rem
+end
+
+---Floor every unfrozen share and hand the remaining cells to the largest
+---fractions, one cell each, never past `max`.
+local function round_flex(sizes, specs, flex, rem)
+  local wsum = 0
+  for _, i in ipairs(flex) do
+    if sizes[i] == nil then
+      wsum = wsum + (specs[i].weight or 1)
+    end
+  end
+  if wsum > 0 and rem > 0 then
+    local fractions, assigned = {}, 0
+    for _, i in ipairs(flex) do
+      if sizes[i] == nil then
+        local exact = rem * (specs[i].weight or 1) / wsum
+        sizes[i] = math.floor(exact)
+        assigned = assigned + sizes[i]
+        fractions[#fractions + 1] = { i = i, frac = exact - sizes[i] }
+      end
+    end
+    table.sort(fractions, function(a, b)
+      return a.frac > b.frac
+    end)
+    local leftover = rem - assigned
+    local k = 1
+    while leftover > 0 do
+      local item = fractions[k]
+      local max = specs[item.i].max
+      if max == nil or sizes[item.i] < max then
+        sizes[item.i] = sizes[item.i] + 1
+        leftover = leftover - 1
+      end
+      k = k + 1
+      if k > #fractions then
+        k = 1
       end
     end
   end
+  for _, i in ipairs(flex) do
+    if sizes[i] == nil then
+      sizes[i] = 0
+    end
+  end
+end
 
-  local total = 0
-  for i = 1, n do
-    total = total + (sizes[i] or 0)
-  end
-  local overflow = math.max(had_overflow, total - avail)
-  if overflow > 0 then
-    had_overflow = overflow
-  end
-  local guard = 0
-  while overflow > 0 and guard < 10000 do
-    guard = guard + 1
+---Take `overflow` cells back. Flex entries give first, the largest one at a
+---time and never below their min; after that any entry gives, the last one
+---first, so the tail of the list pays for the clipping. Terminates because
+---every pass either shrinks a size or returns.
+local function shrink(sizes, specs, flex, overflow)
+  while overflow > 0 do
     local pick, pick_size = nil, 0
     for _, i in ipairs(flex) do
       local size = sizes[i] or 0
@@ -139,7 +130,7 @@ local function allocate(specs, avail)
       end
     end
     if not pick then
-      for i = n, 1, -1 do
+      for i = #specs, 1, -1 do
         if (sizes[i] or 0) > 0 then
           pick = i
           break
@@ -147,13 +138,33 @@ local function allocate(specs, avail)
       end
     end
     if not pick then
-      break
+      return
     end
     sizes[pick] = sizes[pick] - 1
     overflow = overflow - 1
   end
+end
 
-  return sizes, had_overflow
+---Distribute `avail` cells over size specs, reporting how many cells had to be
+---clipped when even the mins do not fit.
+local function allocate(specs, avail)
+  local sizes, flex, fixed_sum = split_fixed(specs)
+  local overflow = math.max(0, fixed_sum - avail)
+  local rem = math.max(0, avail - fixed_sum)
+  if #flex > 0 then
+    rem = share_flex(sizes, specs, flex, rem)
+    round_flex(sizes, specs, flex, rem)
+  end
+
+  local total = 0
+  for i = 1, #specs do
+    total = total + (sizes[i] or 0)
+  end
+  overflow = math.max(overflow, total - avail)
+  if overflow > 0 then
+    shrink(sizes, specs, flex, overflow)
+  end
+  return sizes, overflow
 end
 
 function M.compute(root, rect)

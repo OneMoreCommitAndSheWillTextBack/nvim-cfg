@@ -84,3 +84,48 @@ H.ok(#warnings > 0, "squeeze reported as a layout warning")
 for _, p in ipairs(tp) do
   H.ok(p.rect.row >= 1 and p.rect.height >= 0, "rect stays inside the canvas")
 end
+
+-- allocate: table-driven pins for fixed/flex/min/max/overflow behavior. A
+-- borderless row hands each child exactly the size `allocate` returned, so the
+-- child widths are the function's output.
+local function widths(specs, avail)
+  local children = {}
+  for i, spec in ipairs(specs) do
+    children[i] = text_card({ width = spec })
+  end
+  local pl = layout.compute(ui.card({ layout = "row", border = false, children = children }), geom.new(1, 1, 4, avail))
+  local got = {}
+  for i = 2, #pl do
+    got[#got + 1] = pl[i].rect.width
+  end
+  return got
+end
+
+local allocate_cases = {
+  { name = "fixed sizes are honored", specs = { 3, 4 }, avail = 10, want = { 3, 4 } },
+  { name = "one flex takes the rest", specs = { 3, ui.flex(1) }, avail = 10, want = { 3, 7 } },
+  { name = "flex shares by weight", specs = { ui.flex(1), ui.flex(2) }, avail = 9, want = { 3, 6 } },
+  {
+    name = "fractional cells go to the largest fraction",
+    specs = { ui.flex(1), ui.flex(1), ui.flex(1) },
+    avail = 10,
+    want = { 4, 3, 3 },
+  },
+  { name = "min freezes a flex item", specs = { ui.flex(1, { min = 4 }), ui.flex(1) }, avail = 5, want = { 4, 1 } },
+  {
+    name = "max clamps a flex item and its share is redistributed",
+    specs = { ui.flex(1, { max = 2 }), ui.flex(2) },
+    avail = 10,
+    want = { 2, 8 },
+  },
+  {
+    name = "overfull flex is squeezed to min, then the last card pays",
+    specs = { ui.flex(1, { min = 4 }), ui.flex(1, { min = 4 }) },
+    avail = 5,
+    want = { 4, 1 },
+  },
+  { name = "fixed overflow shrinks the last card", specs = { 8, 5 }, avail = 10, want = { 8, 2 } },
+}
+for _, case in ipairs(allocate_cases) do
+  H.eq(widths(case.specs, case.avail), case.want, "allocate: " .. case.name)
+end

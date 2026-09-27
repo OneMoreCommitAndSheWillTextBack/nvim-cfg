@@ -11,7 +11,11 @@ function H.ok(cond, msg)
 end
 
 function H.eq(actual, expected, msg)
-  if actual == expected then
+  local same = actual == expected
+  if not same and type(actual) == "table" and type(expected) == "table" then
+    same = vim.deep_equal(actual, expected)
+  end
+  if same then
     H.passed = H.passed + 1
   else
     H.failed = H.failed + 1
