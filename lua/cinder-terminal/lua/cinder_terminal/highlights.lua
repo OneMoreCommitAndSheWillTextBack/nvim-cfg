@@ -11,7 +11,6 @@ local M = {}
 ---@class CinderTerminal.HighlightGroups
 ---@field normal string Terminal content and unused cells.
 ---@field sidebar string Session list background.
----@field selected string Selected row in the session list.
 ---@field border string Outer border and internal separator.
 ---@field title string Focused panel title and the glowing separator.
 ---@field title_inactive string Unfocused panel title.
@@ -129,9 +128,9 @@ local function apply_card_theme()
   -- cinder-ui caches the highlight variants it derives per row; a new
   -- colorscheme has to drop them or the selection bar keeps the old colors.
   -- `setup()` only applies defaults, so the groups set just above survive.
-  pcall(function()
-    require("cinder_ui.theme").setup()
-  end)
+  -- cinder-ui is a declared dependency, so a missing one must fail loudly
+  -- instead of leaving the cards with the wrong colors forever.
+  require("cinder_ui.theme").setup()
 end
 
 --- Rebuild the CinderTerminal highlight layer for the active colorscheme.

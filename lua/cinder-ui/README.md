@@ -66,7 +66,8 @@ app:set_footer("  j/k move  q quit  ")
 | `ui.App.new{ width, height, border, zindex, focus, enter }` | `width/height <= 1` 视为屏幕比例 |
 | `app:open(root)` / `app:redraw()` | 打开/立即重绘（`open` 也会做校验） |
 | `app:invalidate()` | 合并重绘（`vim.schedule`） |
-| `app:focus(id)` / `app:cycle(dir)` / `app:focusables()` | 焦点管理，`cycle` 跳过 `focusable = false` 的卡 |
+| `app:focus(id, { redraw = false })` / `app:cycle(dir)` / `app:focusables()` | 焦点管理，`cycle` 跳过 `focusable = false` 的卡；`redraw = false` 只设 id，给随后同步重绘的调用方 |
+| `app:set_geometry{ width, height, row, col }` | 由使用方自己的布局数学移动/缩放浮窗（nil 字段保持原值） |
 | `app:placement(id)` / `app:find(id)` / `app:card_at(row, col)` | 查布局（`placement` 带 `rect` / `inner`） |
 | `app:set_footer(text)` / `app:close()` | 浮窗 footer / 关闭 |
 | `ui.ensure_visible(cursor, top, height, total)` | 滚动跟随小工具（写你自己的 j/k 时用） |

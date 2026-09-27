@@ -95,19 +95,6 @@ function M:command()
   return parts
 end
 
----@param text string
----@param width number
----@return string
-function M:display_text(text, width)
-  if width <= 0 or fn.strdisplaywidth(text) <= width then
-    return text
-  end
-  if width <= 3 then
-    return fn.strcharpart(text, 0, width)
-  end
-  return fn.strcharpart(text, 0, width - 3) .. "..."
-end
-
 ---@param cwd string
 ---@return string
 function M:title(cwd)

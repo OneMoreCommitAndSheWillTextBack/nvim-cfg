@@ -49,7 +49,7 @@ local defaults = {
 
 local instance
 
----@param opts table
+---@param opts? CinderTerminal.Options
 ---@return table
 local function options_with_defaults(opts)
   return vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
@@ -108,6 +108,25 @@ local function ui()
     error('cinder-terminal.nvim is not initialized; call require("cinder_terminal").setup() first', 2)
   end
   return instance.ui
+end
+
+---Callback for "create one more local terminal": remember the new id so the
+---next snapshot selects it, then re-read the providers. `:CinderTerminalNew`
+---and `copy_current()` differ only in what they ask the provider to do.
+---@param workspace CinderTerminal.UI
+---@param failure string What to report when the provider sends no message.
+---@return fun(ok: boolean, id?: string, error?: string)
+local function after_create(workspace, failure)
+  return function(ok, id, error)
+    if not ok then
+      workspace:notify_failure(error, failure)
+      return
+    end
+    if id then
+      workspace.state.pending_item = id
+    end
+    workspace:refresh()
+  end
 end
 
 local function define_commands()
@@ -287,18 +306,10 @@ function M.add()
   if not local_provider then
     return M
   end
-  local_provider:create_terminal({ id = "local", kind = "container", provider = "local" }, function(ok, id, error)
-    if not ok then
-      if error then
-        workspace:notify(error, "error")
-      end
-      return
-    end
-    if id then
-      workspace.state.pending_item = id
-    end
-    workspace:refresh(true)
-  end)
+  local_provider:create_terminal(
+    { id = "local", kind = "container", provider = "local" },
+    after_create(workspace, "could not create the terminal")
+  )
   return M
 end
 
@@ -309,18 +320,7 @@ function M.copy_current()
     return M
   end
   local node = workspace:selected_item()
-  local_provider:duplicate(node, function(ok, id, error)
-    if not ok then
-      if error then
-        workspace:notify(error, "error")
-      end
-      return
-    end
-    if id then
-      workspace.state.pending_item = id
-    end
-    workspace:refresh(true)
-  end)
+  local_provider:duplicate(node, after_create(workspace, "could not copy the terminal"))
   return M
 end
 
@@ -355,7 +355,7 @@ function M.prev()
 end
 
 function M.refresh()
-  ui():refresh(true)
+  ui():refresh()
   return M
 end
 

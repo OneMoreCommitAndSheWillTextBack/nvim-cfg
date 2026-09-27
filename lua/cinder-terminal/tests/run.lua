@@ -278,7 +278,7 @@ run_case("workspace renders containers, items and terminal", function()
   workspace:open()
 
   truthy(workspace:is_open(), "workspace is open")
-  workspace:refresh(true)
+  workspace:refresh()
   eq(#workspace.state.containers, 1, "one container")
   eq(workspace.state.containers[1].label, "local", "container label")
 
@@ -354,7 +354,7 @@ local function make_workspace()
     workspace:map_terminal_buffer(buf)
   end
   workspace:open()
-  workspace:refresh(true)
+  workspace:refresh()
   return workspace, local_provider
 end
 
@@ -429,7 +429,7 @@ run_case("killing the displayed terminal keeps the workspace open", function()
   local workspace, local_provider = make_workspace()
   local first = local_provider:create(vim.fn.getcwd())
   local second = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   eq(#workspace.state.items, 2, "two local terminals")
 
   workspace:select_item("local:" .. first.id)
@@ -485,7 +485,7 @@ end)
 run_case("restarting the displayed terminal keeps the workspace open", function()
   local workspace, local_provider = make_workspace()
   local created = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:select_item("local:" .. created.id)
 
   workspace:set_focus("terminal")
@@ -679,14 +679,14 @@ run_case("the containers panel grows and shrinks with the container list", funct
   local containers = { stub_container("stub:1", "one"), stub_container("stub:2", "two") }
   workspace:set_providers({ stub_provider(containers) })
   workspace:open()
-  workspace:refresh(true)
+  workspace:refresh()
   eq(#workspace.state.containers, 2, "two containers")
   eq(workspace.state.app:placement("containers").rect.height, 4, "the card shows two containers below its border")
 
   for i = 3, 8 do
     containers[#containers + 1] = stub_container("stub:" .. i, "c" .. i)
   end
-  workspace:refresh(true)
+  workspace:refresh()
   eq(#workspace.state.containers, 8, "eight containers")
   eq(
     workspace.state.app:placement("containers").rect.height,
@@ -696,7 +696,7 @@ run_case("the containers panel grows and shrinks with the container list", funct
 
   containers = { containers[1] }
   workspace:set_providers({ stub_provider(containers) })
-  workspace:refresh(true)
+  workspace:refresh()
   eq(workspace.state.app:placement("containers").rect.height, 3, "the card shrinks again")
 
   workspace:close()
@@ -725,7 +725,7 @@ end
 run_case("a terminal pane leaves the job with the configured escape keys", function()
   local workspace, local_provider = make_workspace()
   local first = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
 
   local maps = terminal_normal_maps(first.buf)
   local instant = maps[key_code("<C-\\>")]
@@ -762,7 +762,7 @@ end)
 run_case("the double escape sends one Esc and leaves on the second", function()
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:select_item("local:" .. session.id)
   workspace:set_focus("terminal")
 
@@ -818,7 +818,7 @@ run_case("digits switch terminals from the list", function()
   end
   workspace:set_providers({ stub_provider({ container }) })
   workspace:open()
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:set_focus("items")
   eq(#workspace.state.items, 11, "eleven terminals")
 
@@ -869,7 +869,7 @@ run_case("while typing, <C-b> leaves the job for the list", function()
   local interaction = require("cinder_terminal.interaction")
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   truthy(
     wait_for(1000, function()
       return api.nvim_win_get_buf(workspace.state.win.terminal) == session.buf
@@ -902,7 +902,7 @@ end)
 run_case("Tab swaps the sidebar and the pane", function()
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:select_item("local:" .. session.id)
 
   -- The containers panel is deliberately not a stop: reaching the list or the
@@ -946,7 +946,7 @@ run_case("normal mode keeps the native keys native", function()
   local interaction = require("cinder_terminal.interaction")
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
 
   local bound = {}
   for _, map in ipairs(api.nvim_buf_get_keymap(session.buf, "n")) do
@@ -965,7 +965,7 @@ run_case("normal mode keeps the native keys native", function()
   -- put it back and the hint row will say so.
   workspace.opts.keymaps = { items = "q" }
   local rebound = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   local keys = {}
   for _, map in ipairs(api.nvim_buf_get_keymap(rebound.buf, "n")) do
     keys[map.lhs] = true
@@ -985,7 +985,7 @@ end)
 run_case("the pane types into a terminal that attaches after focus", function()
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
 
   -- Headless Neovim cannot hold Terminal-Job mode, so the test counts the
   -- transition instead of reading the mode; a real pty check lives in the
@@ -1023,7 +1023,7 @@ end
 run_case("the hint row only names keys that are really bound", function()
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:select_item("local:" .. session.id)
   truthy(
     wait_for(2000, function()
@@ -1118,7 +1118,7 @@ end)
 run_case("the pane keeps its mode marker while another panel has focus", function()
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:select_item("local:" .. session.id)
   workspace:set_focus("terminal")
   truthy(
@@ -1154,7 +1154,7 @@ end)
 run_case("the hint row follows the pane mode", function()
   local workspace, local_provider = make_workspace()
   local first = local_provider:create(vim.fn.getcwd())
-  workspace:refresh(true)
+  workspace:refresh()
   workspace:select_item("local:" .. first.id)
   workspace:set_focus("terminal")
   truthy(

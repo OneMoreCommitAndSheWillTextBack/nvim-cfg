@@ -414,14 +414,6 @@ function M:new_session(session_id, callback)
   end)
 end
 
----@param name string
----@param callback fun(ok: boolean, error: string)
-function M:new_unnamed_session(name, callback)
-  self:run({ "new-session", "-d", "-P", "-F", "#{session_id}", "-s", name }, function(ok, stdout, stderr)
-    callback(ok, stderr ~= "" and stderr or stdout, (stdout or ""):gsub("%s+$", ""))
-  end)
-end
-
 ---@param session_id string
 ---@param callback fun(ok: boolean, error: string)
 function M:kill_session(session_id, callback)

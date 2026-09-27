@@ -188,9 +188,14 @@ function App:invalidate()
   end)
 end
 
-function App:focus(id)
+---Focus a card. `opts.redraw = false` only sets the id, for callers that draw
+---synchronously right afterwards (`open`, `redraw`) and do not want a second
+---scheduled redraw.
+function App:focus(id, opts)
   self.focused_id = id
-  self:invalidate()
+  if not (opts and opts.redraw == false) then
+    self:invalidate()
+  end
 end
 
 function App:placement(id)

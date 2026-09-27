@@ -27,16 +27,21 @@ local M = {}
 ---@field caps? CinderTerminal.Provider.Capabilities
 ---@field node? CinderTerminal.Node
 
+---Text of an action: a fixed string, or a function of the context. `keys` is
+---what the action ended up bound to, which only labels need. `nil` hides the
+---action from the hint row or the popup.
+---@alias CinderTerminal.Interaction.Text string|fun(ctx: CinderTerminal.Interaction.Context, keys?: string[]): string?
+
 ---@class CinderTerminal.Interaction
 ---@field name string Stable id, and the `keymaps` entry that overrides it.
 ---@field keys? string[]|fun(ctx): string[] Keys to bind; absent on native hints.
 ---@field option? string `keymaps` entry replacing `keys`.
----@field label? string|fun(ctx, keys): string Hint label, when it differs from
+---@field label? CinderTerminal.Interaction.Text Hint label, when it differs from
 ---the bound keys (`l` for `l`/`<CR>`, `v/y` for a native pair).
----@field help_label? string|fun(ctx, keys): string Label for the `?` popup,
+---@field help_label? CinderTerminal.Interaction.Text Label for the `?` popup,
 ---for keys that are too many to spell out there (`1-9` for ten digits).
----@field desc? string|fun(ctx): string? Hint text; nil hides the action.
----@field help_desc? string|fun(ctx): string? Text in the `?` popup.
+---@field desc? CinderTerminal.Interaction.Text Hint text.
+---@field help_desc? CinderTerminal.Interaction.Text Text in the `?` popup.
 ---@field summary? string `:map` description, defaults to `desc`.
 ---@field surfaces string[] "sidebar" | "pane" | "typing".
 ---@field panels? string[] "containers" | "items", sidebar only.
@@ -367,7 +372,7 @@ local function row_label(action, ctx, keys)
   return action.label
 end
 
----@param value string|fun(ctx, keys): string|nil
+---@param value CinderTerminal.Interaction.Text?
 ---@param ctx CinderTerminal.Interaction.Context
 ---@param keys string[]
 ---@return string?
@@ -399,10 +404,6 @@ function M.label(action, ctx, keys)
   return join_labels(keys)
 end
 
----@param action CinderTerminal.Interaction
----@param ctx CinderTerminal.Interaction.Context
----@param resolve fun(option: string, defaults: string[]): string[]
----@return string[]
 ---Every key of one action as a single string, for callers that list a whole
 ---section (`?`) and want the popup to spell out keys the hint row shortens.
 ---@param name string

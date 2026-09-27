@@ -24,6 +24,10 @@ local ATTACH_DEBOUNCE = 60
 ---The cell a card spends on each side; card content widths subtract it.
 local CARD_BORDER = 2
 
+---Column the `?` popup aligns its descriptions in. Wide enough for the
+---longest key label the interaction table can produce.
+local HELP_DESC_COLUMN = 14
+
 local function valid_win(win)
   return win ~= nil and api.nvim_win_is_valid(win)
 end
@@ -141,7 +145,7 @@ function M.new(opts)
       app = nil,
       win = {},
       buf = {},
-      layout = nil,
+      metrics = nil,
       rendering = false,
       refreshing = false,
       refresh_queued = false,
@@ -204,7 +208,6 @@ function M:dimensions()
     height = self.opts.height,
     left_ratio = self.opts.left_ratio,
     container_rows = #self.state.containers,
-    min_items = 4,
   })
 end
 
@@ -271,7 +274,7 @@ function M:terminal_title()
   -- The card spends one cell per border and two more before the title, so a
   -- long terminal name must be cut here: otherwise the marker is clipped away
   -- and the pane silently stops saying which mode it is in.
-  local budget = (state.layout and state.layout.terminal_width or 60) - 4
+  local budget = (state.metrics and state.metrics.terminal_width or 60) - 4
   return display_text(label, math.max(1, budget - #marker)) .. marker
 end
 
@@ -304,7 +307,7 @@ end
 function M:create_windows()
   local state = self.state
   local d = self:dimensions()
-  state.layout = d
+  state.metrics = d
 
   state.app = ui.App.new({
     width = d.frame.width,
@@ -343,7 +346,7 @@ function M:reflow()
   end
   local state = self.state
   local d = self:dimensions()
-  state.layout = d
+  state.metrics = d
   state.app:set_geometry({
     width = d.frame.width,
     height = d.frame.height,
@@ -447,7 +450,7 @@ function M:start_timer()
     interval,
     vim.schedule_wrap(function()
       if self:is_open() then
-        self:refresh(false)
+        self:refresh()
       end
     end)
   )
@@ -487,7 +490,7 @@ function M:open()
   self:setup_autocmds()
   self:start_timer()
   self:prepare_providers()
-  self:refresh(true)
+  self:refresh()
   -- Open on the terminal when there is something to type into, otherwise land
   -- on the items panel so `n` creates the first one.
   local target = self:selected_item() and "terminal" or "items"
@@ -523,7 +526,7 @@ function M:close()
     end
   end
   state.win, state.buf = {}, {}
-  state.layout = nil
+  state.metrics = nil
 end
 
 function M:toggle()
@@ -554,6 +557,32 @@ function M:selected_item()
   end
 end
 
+---The row a freshly listed container should land on: the one the user looked
+---at last, otherwise the provider's active one, otherwise the first.
+---@param items CinderTerminal.Node[]
+---@param remembered? string
+---@return string?
+function M:preferred_item_id(items, remembered)
+  for _, item in ipairs(items) do
+    if item.id == remembered or item.active then
+      return item.id
+    end
+  end
+  return items[1] and items[1].id or nil
+end
+
+---Select one sidebar row, whichever card owns it. `action_move` and the
+---`next`/`prev` commands move the same selection under a different name.
+---@param kind "containers"|"items"
+---@param id string
+function M:select_row(kind, id)
+  if kind == "containers" then
+    self:select_container(id)
+  else
+    self:select_item(id)
+  end
+end
+
 ---Select the first container owned by `name`, waiting for the next snapshot
 ---when the provider has not reported its data yet.
 ---@param name string
@@ -565,7 +594,7 @@ function M:select_provider(name)
     end
   end
   self.state.pending_provider = name
-  self:refresh(true)
+  self:refresh()
   return false
 end
 
@@ -584,15 +613,7 @@ function M:select_container(id, opts)
   local container = self:selected_container()
   if container then
     state.items = container.children or {}
-    local remembered = state.memory[id]
-    local preferred
-    for _, item in ipairs(state.items) do
-      if item.id == remembered or item.active then
-        preferred = item.id
-        break
-      end
-    end
-    state.selected_item_id = preferred or (state.items[1] and state.items[1].id or nil)
+    state.selected_item_id = self:preferred_item_id(state.items, state.memory[id])
     if state.selected_item_id then
       state.memory[id] = state.selected_item_id
     end
@@ -624,14 +645,14 @@ end
 
 function M:ensure_selection()
   local state = self.state
-  if not self:selected_container() then
+  local container = self:selected_container()
+  if container then
+    state.items = container.children or {}
+  else
     local first = state.containers[1]
     state.selected_container_id = first and first.id or nil
     state.items = first and first.children or {}
     state.selected_item_id = nil
-  else
-    local container = self:selected_container()
-    state.items = container.children or {}
   end
 
   if state.selected_item_id and not self:selected_item() then
@@ -639,15 +660,7 @@ function M:ensure_selection()
   end
 
   if not state.selected_item_id then
-    local remembered = state.memory[state.selected_container_id]
-    local preferred
-    for _, item in ipairs(state.items) do
-      if item.id == remembered or item.active then
-        preferred = item.id
-        break
-      end
-    end
-    state.selected_item_id = preferred or (state.items[1] and state.items[1].id or nil)
+    state.selected_item_id = self:preferred_item_id(state.items, state.memory[state.selected_container_id])
   end
 
   -- While the terminal has focus tmux is the source of truth for which window
@@ -668,25 +681,37 @@ end
 
 -- Rendering ----------------------------------------------------------------
 
+---The rows and the selected id of one sidebar card. Both lists live in the
+---same buffer, so every lookup names the card it means instead of repeating
+---the same `kind == "containers" and ... or ...` in each of them.
+---@param kind "containers"|"items"
+---@return CinderTerminal.Node[] list
+---@return string? selected_id
+function M:sidebar_list(kind)
+  local state = self.state
+  if kind == "containers" then
+    return state.containers, state.selected_container_id
+  end
+  return state.items, state.selected_item_id
+end
+
 ---Index of the selected row in one of the two lists.
----@param kind string
+---@param kind "containers"|"items"
 ---@return number?
 function M:selected_index(kind)
-  local state = self.state
-  local list = kind == "containers" and state.containers or state.items
-  local id = kind == "containers" and state.selected_container_id or state.selected_item_id
+  local list, id = self:sidebar_list(kind)
   for index, node in ipairs(list) do
-    if node.id == id then
+    if id ~= nil and node.id == id then
       return index
     end
   end
 end
 
 ---Visible rows of one card: its height minus the two border rows.
----@param kind string
+---@param kind "containers"|"items"
 ---@return number
 function M:view_height(kind)
-  local d = self.state.layout or self:dimensions()
+  local d = self.state.metrics or self:dimensions()
   if kind == "containers" then
     return math.max(1, d.container_rows - CARD_BORDER)
   end
@@ -698,7 +723,7 @@ end
 function M:sync_scroll()
   local state = self.state
   for _, kind in ipairs(SIDEBAR_PANELS) do
-    local list = kind == "containers" and state.containers or state.items
+    local list = self:sidebar_list(kind)
     local cursor = self:selected_index(kind)
     if cursor then
       state.scroll[kind] = ui.ensure_visible(cursor, state.scroll[kind], self:view_height(kind), #list)
@@ -712,7 +737,7 @@ end
 ---two spaces that separate it from the label.
 ---@return number
 function M:row_text_width()
-  local d = self.state.layout
+  local d = self.state.metrics
   local inner = math.max(8, (d and d.sidebar_width or 30) - CARD_BORDER)
   return inner - 4
 end
@@ -790,9 +815,10 @@ end
 function M:hint_line()
   local state = self.state
   local hl = self:highlights()
-  local width = math.max(8, (state.layout and state.layout.inner_width or 80) - 1)
+  local width = math.max(8, (state.metrics and state.metrics.inner_width or 80) - 1)
   if state.message then
-    return { { text = " " .. display_text(state.message, width), hl = hl.error } }
+    local group = state.message_level == "error" and hl.error or hl.help
+    return { { text = " " .. display_text(state.message, width), hl = group } }
   end
   local parts = {}
   for _, entry in ipairs(self:context_keys()) do
@@ -807,7 +833,7 @@ end
 ---@return table
 function M:build_tree()
   local state = self.state
-  local d = state.layout
+  local d = state.metrics
   return ui.card({
     layout = "column",
     children = {
@@ -873,9 +899,9 @@ function M:render()
     return
   end
   local state = self.state
-  state.layout = self:dimensions()
+  state.metrics = self:dimensions()
   self:sync_scroll()
-  state.app.focused_id = state.focus
+  state.app:focus(state.focus, { redraw = false })
   state.app:open(self:build_tree())
   self:sync_terminal_window()
   self:render_terminal()
@@ -935,7 +961,8 @@ function M:context_keys()
 end
 
 ---@param text string
----@param level? string
+---@param level? string `"error"` paints the message like a failure; anything
+---else (or nil) is an ordinary notice.
 function M:notify(text, level)
   if not text or text == "" then
     return
@@ -951,6 +978,15 @@ function M:notify(text, level)
       end
     end
   end, 5000)
+end
+
+---Report a failed provider call in the hint row. Providers are allowed to
+---fail without a message, but not to fail silently: the caller knows what it
+---asked for, so it names the action.
+---@param error? string
+---@param fallback string
+function M:notify_failure(error, fallback)
+  self:notify(error or fallback, "error")
 end
 
 function M:sync_focus_from_window()
@@ -1206,10 +1242,10 @@ function M:attach_selected()
       return
     end
     if not ok or not buf then
-      if error then
-        self:notify(error, "error")
-        self:show_hint({ "", "  " .. error })
-      end
+      local fallback = "could not attach the terminal"
+      local reason = error or fallback
+      self:notify_failure(error, fallback)
+      self:show_hint({ "", "  " .. reason })
       return
     end
     local label = node.label
@@ -1223,7 +1259,7 @@ end
 
 -- Refresh ------------------------------------------------------------------
 
-function M:refresh(force)
+function M:refresh()
   local state = self.state
   if not self:is_open() then
     return
@@ -1248,7 +1284,7 @@ function M:refresh(force)
       if state.refresh_queued then
         state.refresh_queued = false
         vim.schedule(function()
-          self:refresh(true)
+          self:refresh()
         end)
       end
       return
@@ -1355,6 +1391,9 @@ end
 ---@param node? CinderTerminal.Node
 ---@return number?
 function M:node_buffer(node)
+  if not node then
+    return nil
+  end
   local provider = self:provider(node)
   if not provider or type(provider.buffer) ~= "function" then
     return nil
@@ -1377,9 +1416,8 @@ end
 ---`j`/`k`-family keys and by the public `next`/`prev` commands.
 ---@param delta number
 function M:move_selection(delta)
-  local state = self.state
-  local kind = state.focus == "containers" and "containers" or "items"
-  local list = kind == "containers" and state.containers or state.items
+  local kind = self.state.focus == "containers" and "containers" or "items"
+  local list = self:sidebar_list(kind)
   if #list == 0 then
     return
   end
@@ -1388,11 +1426,7 @@ function M:move_selection(delta)
   if target == current then
     return
   end
-  if kind == "containers" then
-    self:select_container(list[target].id)
-  else
-    self:select_item(list[target].id)
-  end
+  self:select_row(kind, list[target].id)
 end
 
 ---The sidebar motions. The list cursor is card data, so the familiar keys are
@@ -1400,9 +1434,8 @@ end
 ---`<C-d>`/`<C-u>`; the selection bar follows, the window scroll follows it.
 ---@param key string
 function M:action_move(key)
-  local state = self.state
-  local kind = state.card_focus
-  local list = kind == "containers" and state.containers or state.items
+  local kind = self.state.card_focus
+  local list = self:sidebar_list(kind)
   if #list == 0 then
     return
   end
@@ -1426,11 +1459,7 @@ function M:action_move(key)
   if target == current then
     return
   end
-  if kind == "containers" then
-    self:select_container(list[target].id)
-  else
-    self:select_item(list[target].id)
-  end
+  self:select_row(kind, list[target].id)
 end
 
 function M:action_create()
@@ -1446,15 +1475,13 @@ function M:action_create()
   end
   provider:create_terminal(container, function(ok, id, error)
     if not ok then
-      if error then
-        self:notify(error, "error")
-      end
+      self:notify_failure(error, "could not create the terminal")
       return
     end
     if id then
       state.pending_item = id
     end
-    self:refresh(true)
+    self:refresh()
   end)
 end
 
@@ -1517,15 +1544,16 @@ function M:run_menu_entry(entry)
   local provider = entry.provider
   local function done(ok, id, error)
     if not ok then
-      if error then
-        self:notify(error, "error")
-      end
+      self:notify_failure(
+        error,
+        entry.kind == "container" and "could not create the container" or "could not create the terminal"
+      )
       return
     end
     if id then
       state.pending_container = id
     end
-    self:refresh(true)
+    self:refresh()
   end
 
   if entry.kind == "container" then
@@ -1576,9 +1604,7 @@ function M:action_kill()
   self:release_buffer(self:node_buffer(node))
   provider:kill(node, function(ok, error)
     if not ok then
-      if error then
-        self:notify(error, "error")
-      end
+      self:notify_failure(error, "could not kill it")
       return
     end
     if state.selected_item_id == node.id then
@@ -1588,7 +1614,7 @@ function M:action_kill()
       state.selected_container_id = nil
       state.items = {}
     end
-    self:refresh(true)
+    self:refresh()
   end)
 end
 
@@ -1618,10 +1644,10 @@ function M:action_rename()
       return
     end
     provider:rename(node, value, function(ok, error)
-      if not ok and error then
-        self:notify(error, "error")
+      if not ok then
+        self:notify_failure(error, "could not rename it")
       end
-      self:refresh(true)
+      self:refresh()
     end)
   end)
 end
@@ -1638,10 +1664,10 @@ function M:restart_node(node, provider)
   end
   self:release_buffer(self:node_buffer(node))
   provider:restart(node, function(ok, error)
-    if not ok and error then
-      self:notify(error, "error")
+    if not ok then
+      self:notify_failure(error, "could not restart it")
     end
-    self:refresh(true)
+    self:refresh()
   end)
 end
 
@@ -1650,7 +1676,7 @@ end
 function M:action_refresh()
   self.state.attach_force = true
   self:invalidate_terminal()
-  self:refresh(true)
+  self:refresh()
 end
 
 function M:action_close()
@@ -1732,7 +1758,7 @@ function M:show_help()
     for _, row in ipairs(section[2]) do
       local line, row_spans = compose({
         { "    " .. row.key },
-        { string.rep(" ", math.max(2, 14 - #row.key)) },
+        { string.rep(" ", math.max(2, HELP_DESC_COLUMN - #row.key)) },
         { row.desc, hl.detail },
       })
       lines[#lines + 1] = line
@@ -1795,7 +1821,7 @@ end
 ---@param buf number
 ---@param mode string
 ---@param lhs string?
----@param rhs function
+---@param rhs string|function A key sequence or a Lua callback.
 ---@param desc string
 function M:map(buf, mode, lhs, rhs, desc)
   if not lhs then
@@ -1844,13 +1870,17 @@ end
 function M:invoke(binding)
   local action = binding.action
   if binding.run then
-    binding.run(self, binding.gesture)
-  elseif action.rhs then
+    -- A `translate` handler belongs to one specific key, so it takes no
+    -- gesture; an action handler may need it (the digit jump).
+    binding.run(self)
+    return
+  end
+  if action.rhs then
     local keys = api.nvim_replace_termcodes(action.rhs, true, false, true)
     pcall(api.nvim_feedkeys, keys, "n", false)
-  else
-    action.run(self, binding.gesture)
+    return
   end
+  action.run(self, binding.gesture)
 end
 
 ---@return fun(option: string, defaults: string[]): string[]

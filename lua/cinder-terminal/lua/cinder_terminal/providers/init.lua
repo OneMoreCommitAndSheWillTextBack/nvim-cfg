@@ -36,18 +36,19 @@
 ---@field on_change? fun() Called when the provider's own state changed.
 ---@field on_buffer? fun(buf: number) Called for every terminal buffer it makes,
 ---so the workspace can map the pane keys into it.
----@field prepare? fun(self) Called before the workspace's first snapshot:
+---@field prepare? fun(self: CinderTerminal.Provider) Called before the
+---workspace's first snapshot:
 ---providers use it to have something to show (the local shell) instead of
 ---making the user create the first terminal. Must be cheap and idempotent.
----@field snapshot fun(cb: fun(ok: boolean, containers: CinderTerminal.Node[], error?: string))
----@field show fun(node: CinderTerminal.Node, cb: fun(ok: boolean, buf?: number, error?: string), opts?: { force?: boolean })
----@field buffer? fun(node: CinderTerminal.Node): number?
----@field create_container? fun(cb: fun(ok: boolean, id?: string, error?: string))
----@field create_terminal? fun(container: CinderTerminal.Node, cb: fun(ok: boolean, id?: string, error?: string))
----@field kill? fun(node: CinderTerminal.Node, cb: fun(ok: boolean, error?: string))
----@field rename? fun(node: CinderTerminal.Node, label: string, cb: fun(ok: boolean, error?: string))
----@field restart? fun(node: CinderTerminal.Node, cb: fun(ok: boolean, error?: string))
----@field close? fun()
+---@field snapshot fun(self: CinderTerminal.Provider, cb: fun(ok: boolean, containers: CinderTerminal.Node[], error?: string))
+---@field show fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, buf?: number, error?: string), opts?: { force?: boolean })
+---@field buffer? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node): number?
+---@field create_container? fun(self: CinderTerminal.Provider, cb: fun(ok: boolean, id?: string, error?: string))
+---@field create_terminal? fun(self: CinderTerminal.Provider, container: CinderTerminal.Node, cb: fun(ok: boolean, id?: string, error?: string))
+---@field kill? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, error?: string))
+---@field rename? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, label: string, cb: fun(ok: boolean, error?: string))
+---@field restart? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, error?: string))
+---@field close? fun(self: CinderTerminal.Provider)
 
 local M = {}
 
