@@ -42,7 +42,7 @@ The plugin installs no global mappings; the panels use buffer-local ones.
 | Containers | `j`/`k` (counts), `gg`/`G`, `<C-d>`/`<C-u>` move, `l` or `<CR>` open, `n` new, `d` kill, `r` rename, `R` refresh/retry, `q` hide, `?` keys |
 | Terminals | `j`/`k` (counts), `gg`/`G`, `<C-d>`/`<C-u>` move, `1`-`9`/`0` switch to that terminal, `h` containers, `l` or `<CR>` focus terminal, `n` new, `d` kill, `r` rename (tmux) or restart (local) |
 | Terminal pane, typing | `<C-\>` or `<Esc><Esc>` leave the job; `<C-b>` brings the terminal list back |
-| Terminal pane, normal mode | `i` back to the job, `j`/`k`, `gg`, `<C-d>` and every other native key (scroll, `v`/`y` select and yank, `/` search, `q` records a macro), `<Tab>` back to the list |
+| Terminal pane, normal mode | `i` back to the job, `j`/`k`, `gg`, `<C-d>` and every other native key (scroll, `v`/`y` select and yank, `/` search, `q` records a macro), `<C-b>` or `<Tab>` back to the list |
 | Anywhere (not while typing) | `<Tab>`/`<S-Tab>` swap the sidebar and the terminal pane, `<C-/>` hide |
 
 `<Tab>` is a *swap*, not a walk through every panel: it hands the keyboard to
@@ -57,8 +57,9 @@ swap goes in that context.
 The list is the fastest way between terminals: it wears the digit of each of
 its first ten rows, and that digit switches to the terminal and hands it the
 keyboard in one keystroke (`0` is the tenth). `<C-b>` in the pane does the
-opposite trip — it leaves the job for the list, which is also where the tmux
-prefix used to be spent; the provider does not intercept tmux keys any more.
+opposite trip — it leaves the job (or, in normal mode, the scrollback) for the
+list, which is also where the tmux prefix used to be spent; the provider does
+not intercept tmux keys any more.
 
 The pane no longer spends `q`/`h` on the same jump: in normal mode `q` records
 a macro and `h` is a motion, as they are in any other buffer. The action is
@@ -101,7 +102,8 @@ literally — a nested editor — can turn it off.
 The pane looks identical in both modes, so the title gains `normal`, and the
 hint row only ever names keys that really work right now: while typing it shows
 the escape keys and the way back to the list (`<C-b>`), never `<Tab>` or `?`,
-which the job would receive as input instead.
+which the job would receive as input instead. In normal mode it shows the
+pane's own keys — the same `<C-b>`, plus `<Tab>`.
 
 Killing or restarting the terminal shown in the right panel never takes the
 workspace down with it: the pane is released before the old buffer goes away,

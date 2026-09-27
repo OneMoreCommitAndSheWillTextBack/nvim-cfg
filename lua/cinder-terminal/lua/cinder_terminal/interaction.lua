@@ -12,7 +12,8 @@
 ---  pane     the terminal buffer in normal mode. This is a real Neovim buffer
 ---           where `v`, `y`, `d`, `r` and `n` mean something, so only
 ---           navigation and mode switches are bound here: the pane never
----           steals an operator prefix or a motion.
+---           steals an operator prefix or a motion — except `<C-b>`, which
+---           goes back to the list at the cost of native page-up.
 ---  typing   the terminal buffer in Terminal mode. Everything belongs to the
 ---           job except the keys that leave it, so the hint row must not name
 ---           anything else: <Tab> would complete, `?` would be typed into the
@@ -291,9 +292,12 @@ M.actions = {
     option = "list",
     keys = { "<C-b>" },
     desc = "items",
-    help_desc = "leave the job for the list",
+    help_desc = "go back to the list",
     summary = "Items panel",
-    surfaces = { "typing" },
+    -- The one key both pane surfaces share: Terminal mode spends it on leaving
+    -- the job, normal mode on leaving the scrollback, and both land on the
+    -- items list.
+    surfaces = { "typing", "pane" },
     run = function(ui)
       ui:set_focus("items")
     end,

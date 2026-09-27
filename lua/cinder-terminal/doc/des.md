@@ -99,10 +99,10 @@ Node 的字段见 `lua/cinder_terminal/providers/init.lua`。keymap、help 行�
 - 依次回退：`switch-client`（session + window）→ 同 session 时 `select-window`
   → 重连 client 再切。
 - 隐藏工作区不杀 client（重开即时可用），插件卸载时才释放。
-- `C-b` 归工作区：typing 模式下按它直接回终端列表（见 §6.6），字节不会再
-  送进 tmux，所以 pane 里不再使用 tmux 前缀，窗口切换走面板（列表里的数字键
-  一键直达）。焦点在右栏时，侧栏跟随 tmux 的 active window（焦点在列表时不
-  跟随，避免操作被抢走）。
+- `C-b` 归工作区：typing 和 normal 模式下按它都直接回终端列表（见 §6.6），
+  typing 的字节不会再送进 tmux，所以 pane 里不再使用 tmux 前缀，窗口切换走
+  面板（列表里的数字键一键直达）。焦点在右栏时，侧栏跟随 tmux 的 active
+  window（焦点在列表时不跟随，避免操作被抢走）。
 
 ## 6. 生命周期
 
@@ -188,8 +188,9 @@ client 再变小…… 实测 200x55 的界面几次重绘后塌成 35x1。所�
   体感来源。
 - normal mode（`nt`）：terminal buffer 就是一个普通的只读 buffer，
   `v`、`y`、`d`、`gg`、`/` 全部保持原生语义，选区和复制直接用用户已有的
-  肌肉记忆；插件不抢任何 operator 前缀、motion、宏录制键 —— 离开 pane 只靠
-  `<Tab>`（面板里 `q`/`h` 的旧含义留给 normal mode 自己）。
+  肌肉记忆；插件不抢任何 operator 前缀、motion、宏录制键 —— 离开 pane 靠
+  `<Tab>` 或回列表的 `<C-b>`（面板里 `q`/`h` 的旧含义留给 normal mode
+  自己）。
 - 逃生键：`<C-\>` 一键回 normal（Neovim 内置的 `<C-\><C-n>` 不再等第二个
   键），外加 `<Esc><Esc>`。`<Esc><Esc>` **不按字面绑定**：字面的两键映射会让
   Neovim 把每一个落单的 `<Esc>` 扣住 'timeoutlen' 才转发给 job，而 `<Esc>`

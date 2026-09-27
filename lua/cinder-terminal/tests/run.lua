@@ -899,6 +899,52 @@ run_case("while typing, <C-b> leaves the job for the list", function()
   local_provider:close()
 end)
 
+run_case("in normal mode, <C-b> also returns to the list", function()
+  local interaction = require("cinder_terminal.interaction")
+  local workspace, local_provider = make_workspace()
+  local session = local_provider:create(vim.fn.getcwd())
+  workspace:refresh()
+  truthy(
+    wait_for(1000, function()
+      return api.nvim_win_get_buf(workspace.state.win.terminal) == session.buf
+    end),
+    "pane shows the session"
+  )
+
+  local bound = {}
+  for _, map in ipairs(api.nvim_buf_get_keymap(session.buf, "n")) do
+    bound[key_code(map.lhs)] = true
+  end
+  truthy(bound[key_code("<C-b>")], "<C-b> is bound in the pane's normal mode")
+
+  local hinted = {}
+  for _, row in ipairs(interaction.hints(workspace:interaction_context("pane"), workspace:resolver())) do
+    hinted[row.key] = row.desc
+  end
+  eq(hinted["C-b"], "items", "the pane hint row says where it goes")
+
+  -- The help popup merges the typing and pane rows, so the key both modes
+  -- share must show up exactly once.
+  local listed = 0
+  for _, row in
+    ipairs(interaction.help_rows_for({
+      workspace:interaction_context("typing"),
+      workspace:interaction_context("pane"),
+    }, workspace:resolver()))
+  do
+    if row.key == "C-b" then
+      listed = listed + 1
+    end
+  end
+  eq(listed, 1, "the popup lists the shared key once")
+
+  interaction.by_name("list").run(workspace, "<C-b>")
+  eq(workspace.state.focus, "items", "the key lands in the list")
+
+  workspace:close()
+  local_provider:close()
+end)
+
 run_case("Tab swaps the sidebar and the pane", function()
   local workspace, local_provider = make_workspace()
   local session = local_provider:create(vim.fn.getcwd())

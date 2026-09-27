@@ -83,6 +83,7 @@ Terminal card, normal mode:
                   `/`, `yy`, `<C-d>`, marks and the rest are Neovim's own, and
                   the buffer is read-only like every terminal buffer.
     v / y         Select and yank, with the keys you already use for it
+    <C-b>         Back to the terminal list (same key as while typing)
     <Tab>         Move back to items list (the swap; `q`, `h` and the rest of
                   normal mode stay Neovim's own)
 
@@ -150,11 +151,12 @@ not move other clients attached to the same session. The client tty is matched
 by PID (`jobpid()` against `#{client_pid}`). If tmux rejects the switch the
 provider falls back to `select-window`, then to reattaching the client.
 
-`<C-b>` belongs to the workspace in every pane: it leaves the job for the
-terminal list instead of reaching tmux, so the tmux prefix is not used from
-inside the pane. Switch windows from the panels instead. While the terminal
-panel has focus the panels follow the active window; while a panel has focus
-the selection stays where the user put it.
+`<C-b>` belongs to the workspace in every pane: while typing it leaves the job,
+in normal mode it leaves the scrollback, and either way it reaches the terminal
+list instead of tmux, so the tmux prefix is not used from inside the pane.
+Switch windows from the panels instead. While the terminal panel has focus the
+panels follow the active window; while a panel has focus the selection stays
+where the user put it.
 
 Hiding the workspace never kills the tmux client or the tmux server. tmux
 ownership stays with tmux: quitting Neovim leaves sessions running. The

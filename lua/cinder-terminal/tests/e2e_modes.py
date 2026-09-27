@@ -476,6 +476,17 @@ def check_modes(pane, report, drive, scrollback):
 
     report.step("a digit in the list jumps to its terminal", digit_jump)
 
+    def normal_back():
+        # The pane in normal mode is a Neovim buffer: <C-b> reaches the list
+        # from there too, without a detour through Terminal mode.
+        pane.send(b"\x1c")  # <C-\>
+        require(pane.wait_state("nt", timeout=1), "did not leave the job: %s" % pane.state())
+        pane.send(b"\x02")  # <C-b>
+        require(pane.wait_screen("[h] containers"), "normal-mode <C-b> did not reach the list: %s" % pane.screen())
+        return "normal -> list"
+
+    report.step("<C-b> also returns from normal mode", normal_back)
+
 
 def tmux_server(workdir):
     """A private tmux server, so the checks never touch the user's sessions."""
