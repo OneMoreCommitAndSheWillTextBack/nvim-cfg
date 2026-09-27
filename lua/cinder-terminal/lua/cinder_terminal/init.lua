@@ -1,56 +1,113 @@
 ---@class CinderTerminal
 ---cinder-terminal.nvim public API.
 ---
---- The implementation is split into session management, UI, and highlights.
---- Users normally only need `setup()` and the action methods below:
----
----   require("cinder_terminal").setup()
----   require("cinder_terminal").toggle()
-local M = {}
-
-local api = vim.api
+---One floating workspace with a containers panel, an items panel and a terminal
+---panel. Providers supply the data: `local` owns Neovim pty sessions, `tmux`
+---owns tmux sessions and windows driven by a single embedded client.
 local highlights = require("cinder_terminal.highlights")
-local Session = require("cinder_terminal.session")
+local LocalProvider = require("cinder_terminal.providers.local")
+local TmuxProvider = require("cinder_terminal.providers.tmux")
 local UI = require("cinder_terminal.ui")
 
----@class CinderTerminal.Options
----@field cwd? string|fun():string Root directory for new sessions.
----@field root_markers? string[]|false Markers passed to `vim.fs.root`.
----@field shell? string|string[] Shell command used by terminal sessions.
----@field width? number Floating workspace width, relative to the editor.
----@field height? number Floating workspace height, relative to the editor.
----@field sidebar_width? number Session sidebar width.
----@field sidebar_title? string Session sidebar title.
----@field title? string Floating workspace title.
----@field border? string Floating workspace border style.
----@field highlights? {overrides?: table<string, vim.api.keyset.highlight|string>}
+local api = vim.api
 
-local defaults = {
-  width = 0.88,
-  height = 0.82,
-  sidebar_width = 32,
-  border = "rounded",
-  root_markers = { ".git" },
-}
+local M = {}
 
----@type CinderTerminal.HighlightGroups
 M.highlights = highlights.groups
 M.highlight_groups = M.highlights
 
----@class CinderTerminal.Instance
----@field sessions CinderTerminal.SessionManager
----@field ui CinderTerminal.UI
+---@class CinderTerminal.Options
+---@field cwd? string|fun():string Root directory for new local sessions.
+---@field root_markers? string[]|false Markers passed to `vim.fs.root`.
+---@field shell? string|string[] Shell used by local sessions.
+---@field width? number Floating workspace width, relative to the editor.
+---@field height? number Floating workspace height, relative to the editor.
+---@field left_ratio? number Width ratio of the left column.
+---@field border? string Floating border style.
+---@field refresh_interval? number tmux poll interval in milliseconds; 0 disables it.
+---@field confirm? boolean Ask before killing containers or terminals.
+---@field escape_window? number Milliseconds a second `<Esc>` may take to count
+---as the `<Esc><Esc>` gesture in the pane.
+---@field keymaps? table<string, string|string[]|false>
+---@field providers? { local?: table, tmux?: table }
+---@field highlights? { overrides?: table<string, vim.api.keyset.highlight|string> }
+
+local defaults = {
+  width = 0.88,
+  height = 0.86,
+  left_ratio = 0.30,
+  border = "rounded",
+  refresh_interval = 1500,
+  confirm = true,
+  escape_window = 300,
+  keymaps = {},
+  providers = {
+    ["local"] = { enabled = true },
+    tmux = { enabled = true },
+  },
+}
+
 local instance
 
+---@param opts table
+---@return table
 local function options_with_defaults(opts)
   return vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
 end
 
-local function highlight_overrides(opts)
-  if type(opts.highlights) ~= "table" then
+---@param options table
+---@return table?
+local function highlight_overrides(options)
+  if type(options.highlights) ~= "table" then
     return nil
   end
-  return opts.highlights.overrides or opts.highlights
+  return options.highlights.overrides or options.highlights
+end
+
+---@param options table
+---@return CinderTerminal.Provider[]
+local function build_providers(options)
+  local providers = {}
+  local local_opts = options.providers["local"] or {}
+  if local_opts.enabled ~= false then
+    providers[#providers + 1] = LocalProvider.new({
+      cwd = local_opts.cwd or options.cwd,
+      root_markers = local_opts.root_markers or options.root_markers,
+      shell = local_opts.shell or options.shell,
+      auto_shell = local_opts.auto_shell,
+    })
+  end
+
+  local tmux_opts = options.providers.tmux or {}
+  if tmux_opts.enabled ~= false then
+    providers[#providers + 1] = TmuxProvider.new({
+      tmux_binary = tmux_opts.tmux_binary or options.tmux_binary,
+      socket_name = tmux_opts.socket_name or options.socket_name,
+      socket_path = tmux_opts.socket_path or options.socket_path,
+    })
+  end
+  return providers
+end
+
+---@param name string
+---@return CinderTerminal.Provider?
+local function provider(name)
+  if not instance then
+    return nil
+  end
+  for _, item in ipairs(instance.providers) do
+    if item.name == name then
+      return item
+    end
+  end
+end
+
+---@return CinderTerminal.UI
+local function ui()
+  if not instance then
+    error('cinder-terminal.nvim is not initialized; call require("cinder_terminal").setup() first', 2)
+  end
+  return instance.ui
 end
 
 local function define_commands()
@@ -65,38 +122,56 @@ local function define_commands()
       function()
         M.focus()
       end,
-      "Focus the terminal workspace",
+      "Focus the terminal pane",
     },
     CinderTerminalFocusSidebar = {
       function()
         M.focus_sidebar()
       end,
-      "Focus the terminal session sidebar",
+      "Focus the terminals panel",
+    },
+    CinderTerminalSelect = {
+      function()
+        M.select()
+      end,
+      "Focus the containers panel",
     },
     CinderTerminalClose = {
       function()
         M.close_workspace()
       end,
-      "Close the terminal workspace",
+      "Hide the terminal workspace",
     },
     CinderTerminalNew = {
       function(cmd)
         M.open(cmd.args ~= "" and cmd.args or nil)
       end,
-      "Open a new terminal session",
+      "Open a new local terminal session",
       { nargs = "?", complete = "dir" },
+    },
+    CinderTerminalTmux = {
+      function()
+        M.open_tmux()
+      end,
+      "Open the workspace on the tmux containers",
+    },
+    CinderTerminalRefresh = {
+      function()
+        M.refresh()
+      end,
+      "Refresh the terminal workspace",
     },
     CinderTerminalNext = {
       function()
         M.next()
       end,
-      "Switch to the next terminal session",
+      "Select the next entry",
     },
     CinderTerminalPrev = {
       function()
         M.prev()
       end,
-      "Switch to the previous terminal session",
+      "Select the previous entry",
     },
   }
 
@@ -110,42 +185,34 @@ end
 ---@param opts? CinderTerminal.Options
 ---@return CinderTerminal
 function M.setup(opts)
-  local options = options_with_defaults(opts)
-  local override_opt = highlight_overrides(options)
-
   if instance then
     return M
   end
+  local options = options_with_defaults(opts)
+  highlights.setup({ overrides = highlight_overrides(options) })
 
-  highlights.setup({ overrides = override_opt })
-
-  local ui
-  local sessions = Session.new({
-    cwd = options.cwd,
-    root_markers = options.root_markers,
-    shell = options.shell,
-    on_change = function()
-      if ui then
-        ui:refresh()
+  local workspace = UI.new(vim.tbl_extend("force", options, { groups = highlights.groups }))
+  local providers = build_providers(options)
+  for _, item in ipairs(providers) do
+    item.on_buffer = function(buf)
+      workspace:map_terminal_buffer(buf)
+    end
+    item.on_change = function()
+      if item.name == "tmux" then
+        workspace:invalidate_terminal()
       end
-    end,
-    on_buffer = function(buf)
-      if ui then
-        ui:map_session_buffer(buf)
-      end
-    end,
-  })
-
-  ui = UI.new(vim.tbl_extend("force", options, {
-    sessions = sessions,
-    highlights = M.highlights,
-  }))
-  ui:setup_autocmds()
+      workspace:refresh()
+    end
+  end
+  workspace:set_providers(providers)
 
   instance = {
-    sessions = sessions,
-    ui = ui,
+    ui = workspace,
+    providers = providers,
+    options = options,
+    sessions = providers[1] and providers[1].pty or nil,
   }
+  define_commands()
   return M
 end
 
@@ -156,70 +223,140 @@ function M.register_theme(name, callback)
 end
 
 function M.refresh_terminal_theme()
-  return highlights.refresh_terminal_theme()
+  highlights.refresh_terminal_theme()
 end
 
-local function get_ui()
-  if not instance then
-    error('cinder-terminal.nvim is not initialized; call require("cinder_terminal").setup() first', 2)
-  end
-  return instance.ui
-end
-
-function M.refresh()
-  return get_ui():refresh()
+function M.is_open()
+  return instance ~= nil and instance.ui:is_open()
 end
 
 function M.open(cwd)
-  return get_ui():open(cwd)
+  local workspace = ui()
+  if type(cwd) == "string" and cwd ~= "" and cwd ~= "bottom" and cwd ~= "right" then
+    -- Start the requested shell before the workspace does its first snapshot:
+    -- the container is not empty, so the provider's prepare leaves it alone
+    -- and `:CinderTerminalNew <dir>` starts one shell, not two.
+    local local_provider = provider("local")
+    local session = local_provider and local_provider:create(cwd) or nil
+    if session then
+      workspace.state.pending_item = "local:" .. session.id
+    end
+  end
+  workspace:open()
+  return M
+end
+
+function M.open_tmux()
+  local workspace = ui()
+  workspace:open()
+  workspace:select_provider("tmux")
+  workspace:set_focus("containers")
+  return M
 end
 
 function M.toggle()
-  return get_ui():toggle()
+  ui():toggle()
+  return M
 end
 
 function M.focus()
-  return get_ui():focus()
+  local workspace = ui()
+  workspace:open()
+  workspace:set_focus("terminal", { insert = true })
+  return M
 end
 
 function M.focus_sidebar()
-  return get_ui():focus_sidebar()
-end
-
-function M.activate_sidebar_line()
-  return get_ui():activate_sidebar_line()
+  local workspace = ui()
+  workspace:open()
+  workspace:set_focus("items")
+  return M
 end
 
 function M.select()
-  return get_ui():select()
+  local workspace = ui()
+  workspace:open()
+  workspace:set_focus("containers")
+  return M
 end
 
 function M.add()
-  return get_ui():add()
+  local workspace = ui()
+  workspace:open()
+  local local_provider = provider("local")
+  if not local_provider then
+    return M
+  end
+  local_provider:create_terminal({ id = "local", kind = "container", provider = "local" }, function(ok, id, error)
+    if not ok then
+      if error then
+        workspace:notify(error, "error")
+      end
+      return
+    end
+    if id then
+      workspace.state.pending_item = id
+    end
+    workspace:refresh(true)
+  end)
+  return M
 end
 
 function M.copy_current()
-  return get_ui():copy_current()
+  local workspace = ui()
+  local local_provider = provider("local")
+  if not local_provider then
+    return M
+  end
+  local node = workspace:selected_item()
+  local_provider:duplicate(node, function(ok, id, error)
+    if not ok then
+      if error then
+        workspace:notify(error, "error")
+      end
+      return
+    end
+    if id then
+      workspace.state.pending_item = id
+    end
+    workspace:refresh(true)
+  end)
+  return M
 end
 
 function M.close_workspace()
-  return get_ui():close_workspace()
+  ui():close()
+  return M
 end
 
 function M.close_current()
-  return get_ui():close_current()
+  ui():action_kill()
+  return M
 end
 
 function M.restart_current()
-  return get_ui():restart_current()
+  local workspace = ui()
+  local node = workspace:selected_item()
+  if not node or node.provider ~= "local" then
+    return M
+  end
+  workspace:restart_node(node, provider("local"))
+  return M
 end
 
 function M.next()
-  return get_ui():next()
+  ui():move_selection(1)
+  return M
 end
 
 function M.prev()
-  return get_ui():prev()
+  ui():move_selection(-1)
+  return M
+end
+
+function M.refresh()
+  ui():refresh(true)
+  return M
 end
 
 define_commands()

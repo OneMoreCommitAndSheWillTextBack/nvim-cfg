@@ -56,6 +56,10 @@ map("n", "<leader>tr", function()
   terminal().restart_current()
 end, { desc = "Restart Terminal Session" })
 
+map("n", "<leader>tm", function()
+  terminal().open_tmux()
+end, { desc = "tmux Manager" })
+
 map("n", "<leader>tx", function()
   terminal().close_current()
 end, { desc = "Close Terminal Session" })

@@ -1,65 +1,231 @@
-*cinder_terminal.txt*  Persistent floating terminal workspace
+*cinder_terminal.txt*  One floating workspace for every terminal
 
 ==============================================================================
 CONTENTS                                                     *cinder-terminal*
 
     1. Introduction                         |cinder-terminal-introduction|
-    2. Setup                                |cinder-terminal-setup|
-    3. API                                  |cinder-terminal-api|
-    4. Highlights                           |cinder-terminal-highlights|
-    5. Themes                               |cinder-terminal-themes|
-    6. Commands                             |cinder-terminal-commands|
+    2. Layout and keymaps                   |cinder-terminal-keys|
+    3. Providers                            |cinder-terminal-providers|
+    4. Setup                                |cinder-terminal-setup|
+    5. API                                  |cinder-terminal-api|
+    6. Highlights                           |cinder-terminal-highlights|
+    7. Themes                               |cinder-terminal-themes|
+    8. Commands                             |cinder-terminal-commands|
 
 ==============================================================================
 INTRODUCTION                                     *cinder-terminal-introduction*
 
-cinder-terminal.nvim provides a floating terminal workspace with persistent
-terminal sessions, a session sidebar, and commands for switching sessions.
-It uses snacks.nvim for the floating windows.
-
-The plugin does not install keymaps. Add the mappings you prefer in your
-configuration:
+cinder-terminal.nvim owns one floating workspace made of three panels and a
+contextual key hint row:
 
 >
-    local terminal = require("cinder_terminal")
-    vim.keymap.set({ "n", "t" }, "<C-/>", terminal.toggle, {
-      desc = "Terminal Workspace",
-    })
+    ╭─ Containers ────┬───────────────────────────╮
+    │   local    2    │                           │
+    │ T dev      2    │        terminal           │
+    ├─ dev ───────────┤                           │
+    │ 1 bash          │                           │
+    │ 2 nvim          │                           │
+    ├─────────────────┴───────────────────────────┤
+    │ [j/k] move  [l] open  [n] new  [d] kill     │
+    ╰─────────────────────────────────────────────╯
 <
+
+The containers panel lists everything that can hold a terminal, the items
+panel lists the terminals of the selected container, and the terminal panel
+shows the one the cursor points at. Rows come from providers: `local` owns
+Neovim pty sessions, `tmux` owns tmux sessions and windows.
+
+The plugin installs no global mappings; every key below is buffer local.
+
+==============================================================================
+LAYOUT AND KEYMAPS                                     *cinder-terminal-keys*
+
+The cursor lives in one of three places. `h` and `l` move between them, so the
+active panel is always visible instead of being a hidden mode.
+
+Containers panel (top left):
+    j / k         Move between containers (native motions, `gg` and `G` work)
+    l or <CR>     Move into the items panel
+    n             Create a container; picks from a `vim.ui.select()` menu
+    d             Kill the selected container and everything inside it
+    r             Rename the selected container
+    R             Refresh and retry a failed terminal attach
+    q             Hide the workspace
+    ?             Show every keymap
+
+Items panel (bottom left):
+    j / k         Move between terminals of the selected container
+    h             Move back to the containers panel
+    l or <CR>     Focus the terminal panel
+    1-9 / 0       Switch to that terminal (0 is the tenth) and hand it the
+                  keyboard in one key; each row wears its digit
+    n             Create a terminal in the selected container
+    d             Kill the selected terminal
+    r             Rename (tmux window) or restart (local shell)
+    R             Refresh and retry a failed terminal attach
+    q             Hide the workspace
+
+Terminal panel, while typing (Terminal mode):
+    <C-\>         Leave the job (one key; Neovim's own <C-\><C-n> still
+                  works, it just no longer waits for the second key)
+    <Esc><Esc>    The same, as the gesture people actually press
+    <C-b>         Leave the job for the terminal list; the byte is not sent
+                  to the program, and no tmux prefix is reached from here
+
+Terminal panel, normal mode:
+    i             Send keys to the job again
+    j / k         Scroll the scrollback. This is a real normal mode: `gg`,
+                  `/`, `yy`, `<C-d>`, marks and the rest are Neovim's own, and
+                  the buffer is read-only like every terminal buffer.
+    v / y         Select and yank, with the keys you already use for it
+    <Tab>         Move back to items list (the swap; `q`, `h` and the rest of
+                  normal mode stay Neovim's own)
+
+The pane looks the same in both modes, so the title gains `normal` and the key
+row switches to the keys that work right now. The row never advertises a key
+that the current mode would swallow: while keys go to the job <Tab> completes
+and `?` is typed into the program, so neither is listed there, and in the pane
+`?` stays Neovim's backward search. Press `?` in a list panel to see every
+keymap, including the ones the pane deliberately leaves alone.
+
+Neither escape key costs the job anything. The pane binds a single <Esc>,
+forwards that byte to the job itself and only counts a second press inside
+`escape_window` as the <Esc><Esc> gesture, so a lone <Esc> arrives the moment
+it is pressed and 'timeoutlen' plays no part. `keymaps.terminal_normal`
+replaces the list (a string, a list, or `false`); `false` leaves only Neovim's
+own <C-\><C-n> for panes that have to receive a literal <C-\> (a nested
+editor, for example).
+
+The terminal panel always shows the terminal the items cursor points at, so
+moving in the items panel is what switches windows. When the selection has no
+terminal (an empty container, or everything killed) the panel shows
+`select a terminal with l`.
+
+Anywhere:
+    <Tab>         Swap the sidebar and the terminal pane: from either sidebar
+                  panel it hands the keyboard to the terminal, and from the
+                  terminal it comes back to the list. The containers panel is
+                  not a stop, so switching never costs a hop through the
+                  container tree; walk the tree with `h` (up) and `l` (down).
+    <S-Tab>       The same swap
+    <C-/>         Hide or show the workspace (configured by the user)
+
+Creating (`n`):
+    - In the containers panel a menu offers every provider that can create
+      something, for example `local terminal` and `tmux session`. With a
+      single provider the entry is used directly.
+    - In the items panel the container is already known, so `n` creates a
+      terminal in it without a menu.
+
+==============================================================================
+PROVIDERS                                         *cinder-terminal-providers*
+
+local ~
+A single `local` container holds every Neovim pty session. A session is a
+directory plus a shell process. The first open of the workspace starts one, so
+the container is never an empty list waiting for `n`; killing that shell is
+not undone by reopening, and `providers.local.auto_shell = false` turns the
+default off. Hiding the workspace keeps the shells alive; quitting Neovim ends
+them. `r` restarts a session in the same directory.
+
+tmux ~
+Every tmux session is a container, its windows are items. cinder-terminal
+keeps exactly one embedded client and moves it with:
+
+>
+    tmux switch-client -c <client_tty> -t '<session>:@<window>'
+<
+
+The current window of a tmux client is per client, so browsing the panels does
+not move other clients attached to the same session. The client tty is matched
+by PID (`jobpid()` against `#{client_pid}`). If tmux rejects the switch the
+provider falls back to `select-window`, then to reattaching the client.
+
+`<C-b>` belongs to the workspace in every pane: it leaves the job for the
+terminal list instead of reaching tmux, so the tmux prefix is not used from
+inside the pane. Switch windows from the panels instead. While the terminal
+panel has focus the panels follow the active window; while a panel has focus
+the selection stays where the user put it.
+
+Hiding the workspace never kills the tmux client or the tmux server. tmux
+ownership stays with tmux: quitting Neovim leaves sessions running.
+
+Requires the `tmux` binary. Without it the provider stays silent and the
+create menu stops offering tmux sessions.
+
+The session Neovim itself runs in is listed like any other, marked `current`.
+It cannot be attached: an embedded client inside its own session makes tmux
+resize that session to the client, which shrinks the pane hosting Neovim until
+the workspace collapses. Killing it (or the pane Neovim lives in) is refused as
+well; the help row explains both refusals.
+
+The embedded client always talks to the same server as the rest of the
+plugin: with `socket_path`/`socket_name` when configured, otherwise with the
+socket `$TMUX` points at. That makes the plugin work when Neovim itself runs
+inside tmux on a non-default socket (`tmux -L work`).
+
+A client that dies without being asked to (server gone, socket mismatch, tmux
+killed the session under it) is restarted. After three attaches that die right
+away the provider backs off (2s, 4s, ... up to 30s) instead of spawning
+clients in a loop; the terminal panel keeps showing the last output and the
+hint row explains the failure. `R` clears the backoff and retries at once.
 
 ==============================================================================
 SETUP                                                  *cinder-terminal-setup*
 
-Call |cinder_terminal.setup()| from your plugin manager's `opts` or `config`:
-
 >
     return {
-      dir = "~/src/cinder-terminal.nvim",
+      dir = "~/.config/nvim/lua/cinder-terminal",
+      name = "cinder-terminal.nvim",
       main = "cinder_terminal",
-      dependencies = { "folke/snacks.nvim" },
+      lazy = false,
       opts = {
         width = 0.88,
-        height = 0.82,
-        sidebar_width = 32,
+        height = 0.86,
+        left_ratio = 0.30,
       },
+      config = function(_, opts)
+        local terminal = require("cinder_terminal")
+        terminal.setup(opts)
+      end,
     }
 <
 
-Available options:
+                                                       *cinder-terminal-options*
+    width             floating width ratio. Defaults to 0.88.
+    height            floating height ratio. Defaults to 0.86.
+    left_ratio        width ratio of the left column. Defaults to 0.30.
+    border            border style passed to |nvim_open_win()|. Defaults to
+                      "rounded".
+    refresh_interval  tmux poll interval in milliseconds. Defaults to 1500;
+                      set to 0 to refresh only after actions.
+    confirm           ask before killing. Defaults to true.
+    escape_window     milliseconds a second <Esc> may take to count as the
+                      <Esc><Esc> gesture in the pane. Defaults to 300. Only
+                      the gesture uses it: the first <Esc> is on its way to
+                      the job already, so a lone one never waits.
+    keymaps           override plugin keys, e.g. `{ new = "a" }`; `false`
+                      disables one. `keymaps.items` binds the pane's jump back
+                      to the items panel, unbound by default so the pane keeps
+                      Neovim's `q` and `h`; `keymaps.switch = false` turns off
+                      the list's digit jumps. `keymaps.terminal_normal` is the
+                      escape list of the pane's Terminal mode: one key, a list
+                      of keys, or `false`. It defaults to
+                      `{ "<C-\>", "<Esc><Esc>" }`; the panes bind every entry
+                      buffer-locally.
+    providers         per provider options:
+                        providers.local.enabled    default true
+                        providers.local.cwd        root for new shells
+                        providers.local.root_markers  for `vim.fs.root()`
+                        providers.local.shell      shell command or list
+                        providers.local.auto_shell  start one shell on the
+                                                   first open (default true)
+                        providers.tmux.enabled     default true
+                        providers.tmux.tmux_binary default "tmux"
+                        providers.tmux.socket_name / socket_path
 
-                                                            *cinder-terminal-options*
-    cwd             string or function returning a directory. Defaults to the
-                    LazyVim root when available, then `vim.fs.root()`.
-    root_markers    markers used by `vim.fs.root`; set to false to disable
-                    project-root lookup.
-    shell           shell command passed to `termopen()`.
-    width           floating workspace width. Defaults to 0.88.
-    height          floating workspace height. Defaults to 0.82.
-    sidebar_width   session sidebar width. Defaults to 32.
-    sidebar_title   sidebar title.
-    title           floating workspace title.
-    border          Snacks border style. Defaults to "rounded".
-    highlights      a table of user overrides, documented below.
+    cwd, root_markers, shell, tmux_binary, socket_name and socket_path are
+    also accepted at the top level and used as provider defaults.
 
 ==============================================================================
 API                                                          *cinder-terminal-api*
@@ -67,47 +233,54 @@ API                                                          *cinder-terminal-ap
 The module returned by `require("cinder_terminal")` exposes:
 
                                                             *cinder_terminal.setup()*
-    `setup(opts?)` initializes the plugin once and returns the module. Call it
-    during startup; subsequent calls are ignored.
+    `setup(opts?)` initializes the plugin once and returns the module.
 
                                                             *cinder_terminal.toggle()*
-    Show the workspace and focus its terminal, or close it when visible.
+    Show the workspace (focusing the terminal when one is selected, otherwise
+    the items panel), or hide it when visible.
 
                                                             *cinder_terminal.open()*
-    Open a new session. An optional directory can be passed.
+    Open the workspace. An optional directory creates a local session there.
+
+                                                            *cinder_terminal.open_tmux()*
+    Open the workspace with the tmux containers selected.
 
                                                             *cinder_terminal.focus()*
-    Show the workspace and focus the terminal without entering insert mode.
+    Show the workspace and focus the terminal panel with insert mode.
 
                                                             *cinder_terminal.focus_sidebar()*
-    Show the workspace and focus the session sidebar.
+    Show the workspace and focus the items panel.
 
                                                             *cinder_terminal.select()*
-    Select a session using `vim.ui.select()`.
+    Show the workspace and focus the containers panel.
 
                                                             *cinder_terminal.add()*
-    Prompt for a directory and open a session there.
+    Prompt for a directory and create a local session there.
 
                                                             *cinder_terminal.copy_current()*
-    Open another session using the current terminal process directory.
+    Create another local session using the process directory of the selected
+    one.
 
                                                             *cinder_terminal.close_workspace()*
-    Hide the floating workspace while keeping sessions alive.
+    Hide the workspace while keeping every session alive.
 
                                                             *cinder_terminal.close_current()*
-    Close the current session.
+    Kill the selected container or terminal.
 
                                                             *cinder_terminal.restart_current()*
-    Close and recreate the current session.
+    Restart the selected local session.
 
                                                             *cinder_terminal.next()*
-    Focus the next session.
+    Select the next entry in the focused panel.
 
                                                             *cinder_terminal.prev()*
-    Focus the previous session.
+    Select the previous entry in the focused panel.
 
                                                             *cinder_terminal.refresh()*
-    Refresh the sidebar and workspace title.
+    Refresh every provider immediately.
+
+                                                            *cinder_terminal.is_open()*
+    True while the workspace is visible.
 
                                                             *cinder_terminal.register_theme()*
     `register_theme(name, callback)` registers one colorscheme adapter. The
@@ -124,23 +297,27 @@ The public groups are available as `require("cinder_terminal").highlights`:
 
 >
     local terminal = require("cinder_terminal")
-    vim.api.nvim_set_hl(0, terminal.highlights.normal, {
+    vim.api.nvim_set_hl(0, terminal.highlights.sidebar, {
       bg = "#232a2e",
     })
 <
 
-The group names use the `CinderTerminal.*` namespace:
-
-    normal      terminal content and unused cells
-    sidebar     session list background
-    selected    selected session row
-    border      outer border and internal separator
-    title       workspace title
+    normal             terminal content and unused cells
+    sidebar            left column background
+    selected           cursorline of the focused panel
+    selected_inactive  cursorline of an unfocused panel
+    border             outer border and separators
+    title              focused panel title and glowing separator
+    title_inactive     unfocused panel title
+    help               contextual key hint row
+    mark               container type letter (T, D, ...)
+    detail             secondary row text
+    error              failed terminals and error messages
 
 Each group starts with a standard Neovim group (`NormalFloat`, `CursorLine`,
-`FloatBorder`, or `FloatTitle`). User overrides are applied on every theme
-refresh, then the active theme adapter is applied on top. For a
-plugin-manager configuration, use:
+`FloatBorder`, `FloatTitle`, `Comment`, `Special`, or `DiagnosticError`). User
+overrides are applied on every theme refresh, then the active theme adapter is
+applied on top:
 
 >
     opts = {
@@ -161,7 +338,7 @@ Register a colorscheme adapter with |cinder_terminal.register_theme()|:
 >
     local terminal = require("cinder_terminal")
     terminal.register_theme("everforest", function(hl)
-      vim.api.nvim_set_hl(0, hl.normal, { bg = "#232a2e" })
+      vim.api.nvim_set_hl(0, hl.sidebar, { bg = "#343f44" })
     end)
 <
 
@@ -177,14 +354,15 @@ immediately when it matches the current colorscheme.
 ==============================================================================
 COMMANDS                                               *cinder-terminal-commands*
 
-The setup API defines these commands:
-
     :CinderTerminalToggle       toggle the workspace
-    :CinderTerminalFocus        focus the terminal
-    :CinderTerminalFocusSidebar focus the session sidebar
-    :CinderTerminalClose        close the workspace
-    :CinderTerminalNew [dir]    create a session
-    :CinderTerminalNext         switch to the next session
-    :CinderTerminalPrev         switch to the previous session
+    :CinderTerminalFocus        focus the terminal panel
+    :CinderTerminalFocusSidebar focus the items panel
+    :CinderTerminalSelect       focus the containers panel
+    :CinderTerminalNew [dir]    create a local session
+    :CinderTerminalTmux         open the workspace on tmux containers
+    :CinderTerminalRefresh      refresh every provider and retry the terminal
+    :CinderTerminalNext         select the next entry
+    :CinderTerminalPrev         select the previous entry
+    :CinderTerminalClose        hide the workspace
 
  vim:tw=78:ts=8:ft=help:norl:

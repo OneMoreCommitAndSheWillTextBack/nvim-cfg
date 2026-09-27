@@ -5,7 +5,6 @@ return {
     dir = plugin_dir,
     name = "cinder-terminal.nvim",
     main = "cinder_terminal",
-    dependencies = { "folke/snacks.nvim" },
     lazy = false,
     opts = {},
     config = function(_, opts)

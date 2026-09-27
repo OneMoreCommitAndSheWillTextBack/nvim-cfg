@@ -80,19 +80,19 @@ function M:root()
   return self:normalize((vim.uv or vim.loop).cwd() or fn.getcwd()) or fn.getcwd()
 end
 
----@return string|string[]
+---The shell is exec'd directly, so a table is returned and no extra shell
+---wrapper process is spawned around every session.
+---@return string[]
 function M:command()
   local shell = self.opts.shell or vim.o.shell
-  local snacks = _G.Snacks
-  if not snacks then
-    local ok, loaded = pcall(require, "snacks")
-    snacks = ok and loaded or nil
+  if type(shell) == "table" then
+    return shell
   end
-  local terminal = snacks and snacks.terminal
-  if terminal and terminal.parse then
-    return terminal.parse(shell)
+  local parts = vim.split(shell, "%s+", { trimempty = true })
+  if #parts == 0 then
+    return { vim.o.shell }
   end
-  return shell
+  return parts
 end
 
 ---@param text string

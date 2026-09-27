@@ -1,630 +1,1901 @@
 ---@class CinderTerminal.UI
----Snacks floating-window UI for cinder-terminal.nvim.
+---Lazygit style workspace: a single frosted frame split into a containers
+---panel (top left), an items panel (bottom left), a terminal panel (right)
+---and a contextual key hint row.
+local layout = require("cinder_terminal.layout")
+local interaction = require("cinder_terminal.interaction")
+
 local M = {}
 M.__index = M
 
 local api = vim.api
+
+---How long a second `<Esc>` may take to count as `<Esc><Esc>` in the pane.
+---Only the gesture uses it: the first `<Esc>` is already on its way to the job
+---when the window starts, so a lone one never waits.
+local ESCAPE_WINDOW_MS = 300
 local fn = vim.fn
 
----@class CinderTerminal.UIOptions
----@field sessions CinderTerminal.SessionManager
----@field highlights CinderTerminal.HighlightGroups
----@field width? number
----@field height? number
----@field sidebar_width? number
----@field sidebar_title? string
----@field border? string
----@field title? string
+local FRAME_NS = api.nvim_create_namespace("CinderTerminal.Frame")
+local CONTAINERS_NS = api.nvim_create_namespace("CinderTerminal.Containers")
+local ITEMS_NS = api.nvim_create_namespace("CinderTerminal.Items")
 
----@param opts CinderTerminal.UIOptions
----@return CinderTerminal.UI
-function M.new(opts)
-  return setmetatable({
-    opts = opts,
-    sessions = opts.sessions,
-    highlights = opts.highlights,
-    state = {
-      layout = nil,
-      sidebar = nil,
-      terminal = nil,
-      line_sessions = {},
-      refresh_pending = false,
-      augroup = nil,
-    },
-  }, M)
+local PANELS = { "containers", "items" }
+local ATTACH_DEBOUNCE = 60
+
+local function valid_win(win)
+  return win ~= nil and api.nvim_win_is_valid(win)
 end
 
-local function snacks()
-  return _G.Snacks or require("snacks")
+local function valid_buf(buf)
+  return buf ~= nil and api.nvim_buf_is_valid(buf)
 end
 
-function M:workspace_visible()
-  local current = api.nvim_get_current_win()
-  local state = self.state
-  if state.layout and state.layout.root and state.layout.root:win_valid() then
-    if current == state.layout.root.win then
-      return true
-    end
-  end
-  if state.sidebar and state.sidebar:win_valid() and current == state.sidebar.win then
-    return true
-  end
-  if state.terminal and state.terminal:win_valid() and current == state.terminal.win then
-    return true
-  end
-  return false
-end
-
-function M:workspace_ready()
-  local state = self.state
-  return state.layout
-    and state.layout:valid()
-    and state.sidebar
-    and state.sidebar:valid()
-    and state.terminal
-    and state.terminal:valid()
-end
-
-function M:update_title()
-  local state = self.state
-  if not (state.layout and state.layout.root and state.layout.root:win_valid()) then
-    return
-  end
-
-  local session = self.sessions:current()
-  local title = self.opts.title or " Terminal Sessions "
-  if session then
-    title = " " .. self.sessions:title(session.cwd) .. " "
-  end
-  state.layout.root:set_title(title, "center")
-end
-
-function M:render_sidebar()
-  local state = self.state
-  if not (state.sidebar and state.sidebar:buf_valid()) then
-    return
-  end
-
-  local win = state.sidebar.win
-  local width = (win and api.nvim_win_is_valid(win)) and api.nvim_win_get_width(win) or 30
-  local lines = {
-    "Terminal Sessions",
-    "",
-  }
-  state.line_sessions = {}
-
-  local list = self.sessions:list()
-  if #list == 0 then
-    lines[#lines + 1] = "No sessions"
-    lines[#lines + 1] = "Press n to create one"
-  else
-    local current = self.sessions:current()
-    for _, session in ipairs(list) do
-      local marker = session == current and ">" or " "
-      local status = session.status or "running"
-      local label = self.sessions:title(session.cwd)
-      local row = string.format("%s %d %-8s %s", marker, session.id, status, label)
-      row = self.sessions:display_text(row, width - 1)
-      lines[#lines + 1] = row
-      state.line_sessions[#lines] = session.id
-    end
-  end
-
-  vim.bo[state.sidebar.buf].modifiable = true
-  api.nvim_buf_set_lines(state.sidebar.buf, 0, -1, false, lines)
-  vim.bo[state.sidebar.buf].modifiable = false
-end
-
-function M:refresh_now()
-  self.state.refresh_pending = false
-  if self.state.sidebar and self.state.sidebar:buf_valid() then
-    self:render_sidebar()
-  end
-  self:update_title()
-end
-
-function M:refresh()
-  if self.state.refresh_pending then
-    return
-  end
-  self.state.refresh_pending = true
-  vim.schedule(function()
-    self:refresh_now()
-  end)
-end
-
-function M:set_terminal_focus(start_insert)
-  local terminal = self.state.terminal
-  if not (terminal and terminal:win_valid()) then
-    return
-  end
-  api.nvim_set_current_win(terminal.win)
-  if start_insert then
-    vim.cmd.startinsert()
-  else
-    vim.cmd.stopinsert()
-  end
-end
-
-function M:set_sidebar_focus()
-  local sidebar = self.state.sidebar
-  if not (sidebar and sidebar:win_valid()) then
-    return
-  end
-  pcall(vim.cmd.stopinsert)
-  api.nvim_set_current_win(sidebar.win)
+---@param filetype string
+---@param bufhidden? string Defaults to `wipe`; the terminal placeholder needs
+---`hide`, otherwise it dies as soon as the pane leaves it and can no longer be
+---restored.
+---@return number
+local function scratch(filetype, bufhidden)
+  local buf = api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = bufhidden or "wipe"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].buflisted = false
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = filetype
+  return buf
 end
 
 ---@param buf number
-function M:map_session_buffer(buf)
-  local function opts(desc)
-    return { buffer = buf, desc = desc, nowait = true, silent = true }
+---@param lines string[]
+local function set_lines(buf, lines)
+  if not valid_buf(buf) then
+    return
   end
-
-  vim.keymap.set("t", "<Esc><Esc>", [[<C-\><C-n>]], opts("Terminal Normal Mode"))
-  vim.keymap.set("n", "<C-w>h", function()
-    self:focus_sidebar()
-  end, opts("Focus Terminal Sidebar"))
-  vim.keymap.set("n", "<leader>wh", function()
-    self:focus_sidebar()
-  end, opts("Focus Terminal Sidebar"))
-  vim.keymap.set("n", "q", function()
-    self:close_workspace()
-  end, opts("Close Terminal Workspace"))
-  vim.keymap.set("n", "]T", function()
-    self:next()
-  end, opts("Next Terminal Session"))
-  vim.keymap.set("n", "[T", function()
-    self:prev()
-  end, opts("Previous Terminal Session"))
-  vim.keymap.set("n", "<leader>Ts", function()
-    self:select()
-  end, opts("Select Terminal Session"))
-  vim.keymap.set("n", "<leader>Ta", function()
-    self:add()
-  end, opts("Add Terminal Session"))
-  vim.keymap.set("n", "<leader>Tx", function()
-    self:close_current()
-  end, opts("Close Terminal Session"))
+  vim.bo[buf].modifiable = true
+  api.nvim_buf_set_lines(buf, 0, -1, false, #lines > 0 and lines or { "" })
+  vim.bo[buf].modifiable = false
 end
 
-function M:ensure_layout()
+---@param buf number
+---@param ns number
+---@param group string
+---@param row number
+---@param col_start number
+---@param col_end number
+---@param priority number
+local function mark(buf, ns, group, row, col_start, col_end, priority)
+  if not valid_buf(buf) or not group or col_end <= col_start then
+    return
+  end
+  api.nvim_buf_set_extmark(buf, ns, row, col_start, {
+    end_row = row,
+    end_col = col_end,
+    hl_group = group,
+    priority = priority,
+  })
+end
+
+---@param text string
+---@param width number
+---@return string
+local function display_text(text, width)
+  text = tostring(text or "")
+  if width <= 0 or fn.strdisplaywidth(text) <= width then
+    return text
+  end
+  if width <= 3 then
+    return fn.strcharpart(text, 0, width)
+  end
+  return fn.strcharpart(text, 0, width - 3) .. "..."
+end
+
+---@param chunks { [1]: string, [2]?: string }[]
+---@return string line
+---@return { [1]: string, [2]: number, [3]: number }[] spans
+local function compose(chunks)
+  local line, spans, pos = "", {}, 0
+  for _, chunk in ipairs(chunks) do
+    local text, group = chunk[1], chunk[2]
+    if text and text ~= "" then
+      if group then
+        spans[#spans + 1] = { group, pos, pos + #text }
+      end
+      line = line .. text
+      pos = pos + #text
+    end
+  end
+  return line, spans
+end
+
+---@param node CinderTerminal.Node
+---@param highlights CinderTerminal.HighlightGroups
+---@return string
+local function detail_group(node, highlights)
+  local status = node.status or ""
+  if status == "" or status == "running" or status == "active" or status == "attached" then
+    return highlights.detail
+  end
+  return highlights.error
+end
+
+---@param opts table
+---@return CinderTerminal.UI
+function M.new(opts)
+  local self = setmetatable({
+    opts = opts,
+    providers = {},
+    provider_by_name = {},
+    state = {
+      opened = false,
+      focus = "items",
+      containers = {},
+      items = {},
+      selected_container_id = nil,
+      selected_item_id = nil,
+      memory = {},
+      line_ids = { containers = {}, items = {} },
+      win = {},
+      buf = {},
+      layout = nil,
+      rendering = false,
+      refreshing = false,
+      refresh_queued = false,
+      attach_generation = 0,
+      attach_timer = nil,
+      attached_item_id = nil,
+      attach_force = false,
+      terminal_insert = false,
+      escape_at = nil,
+      shutting_down = false,
+      pending_item = nil,
+      pending_container = nil,
+      pending_provider = nil,
+      message = nil,
+      message_level = nil,
+      timer = nil,
+      augroup = nil,
+      terminal_title = "",
+      mapped_buffers = {},
+    },
+  }, M)
+  return self
+end
+
+---@param providers CinderTerminal.Provider[]
+function M:set_providers(providers)
+  self.providers = providers
+  self.provider_by_name = {}
+  for _, provider in ipairs(providers) do
+    self.provider_by_name[provider.name] = provider
+  end
+end
+
+---@param node? CinderTerminal.Node
+---@return CinderTerminal.Provider?
+function M:provider(node)
+  if not node then
+    return nil
+  end
+  return self.provider_by_name[node.provider]
+end
+
+---@return CinderTerminal.HighlightGroups
+function M:highlights()
+  return self.opts.groups or require("cinder_terminal.highlights").groups
+end
+
+-- Lifecycle ----------------------------------------------------------------
+
+function M:is_open()
+  return self.state.opened
+    and valid_win(self.state.win.frame)
+    and valid_win(self.state.win.containers)
+    and valid_win(self.state.win.items)
+    and valid_win(self.state.win.terminal)
+end
+
+function M:dimensions()
+  return layout.compute({
+    columns = vim.o.columns,
+    lines = vim.o.lines,
+    cmdheight = vim.o.cmdheight,
+    width = self.opts.width,
+    height = self.opts.height,
+    left_ratio = self.opts.left_ratio,
+    container_rows = #self.state.containers,
+    min_items = 4,
+  })
+end
+
+---@param win number
+---@param kind string
+function M:apply_window_options(win, kind)
+  if not valid_win(win) then
+    return
+  end
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
+  vim.wo[win].foldcolumn = "0"
+  vim.wo[win].wrap = false
+  vim.wo[win].list = false
+  vim.wo[win].spell = false
+  vim.wo[win].cursorline = kind == "containers" or kind == "items"
+  vim.wo[win].winfixbuf = kind == "terminal"
+  -- The frame is only the backdrop of the workspace. A winbar on it would eat
+  -- one of its rows and push the contextual help row out of the window, so the
+  -- chrome belongs to the three panels alone.
+  if kind ~= "frame" then
+    self:update_panel_chrome(win, kind)
+  end
+end
+
+---@param kind string
+---@return string
+function M:panel_title(kind)
   local state = self.state
-  if self:workspace_ready() then
-    return
-  end
-  if state.layout and state.layout:valid() then
-    state.layout:update()
-    if self:workspace_ready() then
-      return
+  local hl = self:highlights()
+  local group = state.focus == kind and hl.title or hl.title_inactive
+  local text
+  if kind == "containers" then
+    text = " Containers"
+  elseif kind == "items" then
+    local container = self:selected_container()
+    text = " " .. ((container and container.label) or "Terminals")
+  else
+    text = state.terminal_title ~= "" and (" " .. state.terminal_title) or " Terminal"
+    -- Both modes look identical in the pane, so the winbar carries the mode
+    -- marker a statusline would show.
+    if kind == "terminal" and self:pane_normal_mode() then
+      return "%#" .. group .. "#" .. text .. " %#" .. hl.detail .. "# normal "
     end
   end
+  return "%#" .. group .. "#" .. text .. " "
+end
 
-  local session = self.sessions:current() or self.sessions:create(self.sessions:root())
-  self.sessions:set_current(session)
+---@param win? number
+---@param kind? string
+function M:update_panel_chrome(win, kind)
+  local state = self.state
+  local hl = self:highlights()
+  local kinds = kind and { kind } or { "containers", "items", "terminal" }
+  for _, name in ipairs(kinds) do
+    local target = win or state.win[name]
+    if valid_win(target) then
+      vim.wo[target].winbar = self:panel_title(name)
+      local focused = state.focus == name
+      local normal = name == "terminal" and hl.normal or hl.sidebar
+      -- `CursorLineNC` does not exist, so the unfocused panel remaps
+      -- `CursorLine` itself and dims through `selected_inactive`.
+      local cursorline = focused and hl.selected or hl.selected_inactive
+      vim.wo[target].winhighlight = table.concat({
+        "Normal:" .. normal,
+        "NormalNC:" .. normal,
+        "EndOfBuffer:" .. normal,
+        "CursorLine:" .. cursorline,
+      }, ",")
+    end
+  end
+end
 
-  state.sidebar = snacks().win({
-    show = false,
-    enter = false,
-    fixbuf = true,
-    minimal = true,
-    border = "right",
-    width = self.opts.sidebar_width or 32,
-    title = self.opts.sidebar_title or " Sessions ",
-    title_pos = "center",
-    bo = {
-      buftype = "nofile",
-      bufhidden = "wipe",
-      buflisted = false,
-      swapfile = false,
-      modifiable = false,
-      filetype = "cinder_terminal_sidebar",
-    },
-    wo = {
-      cursorline = true,
-      number = false,
-      relativenumber = false,
-      signcolumn = "no",
-      statuscolumn = "",
-      wrap = false,
-      winbar = "",
-      winhighlight = table.concat({
-        "Normal:" .. self.highlights.sidebar,
-        "NormalNC:" .. self.highlights.sidebar,
-        "EndOfBuffer:" .. self.highlights.sidebar,
-        "CursorLine:" .. self.highlights.selected,
-        "FloatBorder:" .. self.highlights.border,
-        "FloatTitle:" .. self.highlights.title,
-      }, ","),
-    },
-    keys = {
-      q = false,
-      close = {
-        "q",
-        function()
-          self:close_workspace()
-        end,
-        desc = "Close Workspace",
-        mode = "n",
-      },
-      activate = {
-        "<cr>",
-        function()
-          self:activate_sidebar_line()
-        end,
-        desc = "Activate Session",
-        mode = "n",
-      },
-      new_session = {
-        "n",
-        function()
-          self:open(self.sessions:root())
-        end,
-        desc = "New Session",
-        mode = "n",
-      },
-      copy_session = {
-        "c",
-        function()
-          self:copy_current()
-        end,
-        desc = "Copy Session",
-        mode = "n",
-      },
-      add_session = {
-        "a",
-        function()
-          self:add()
-        end,
-        desc = "Add Session",
-        mode = "n",
-      },
-      close_session = {
-        "x",
-        function()
-          self:close_current()
-        end,
-        desc = "Close Session",
-        mode = "n",
-      },
-      prev = {
-        "[T",
-        function()
-          self:prev()
-        end,
-        desc = "Previous Session",
-        mode = "n",
-      },
-      next = {
-        "]T",
-        function()
-          self:next()
-        end,
-        desc = "Next Session",
-        mode = "n",
-      },
-      refresh = {
-        "r",
-        function()
-          self:refresh()
-        end,
-        desc = "Refresh",
-        mode = "n",
-      },
-      focus_terminal = {
-        "<leader>wl",
-        function()
-          self:focus()
-        end,
-        desc = "Focus Terminal",
-        mode = "n",
-      },
-    },
+function M:create_windows()
+  local state = self.state
+  local d = self:dimensions()
+  state.layout = d
+
+  state.buf.frame = scratch("cinder_terminal_frame")
+  state.buf.containers = scratch("cinder_terminal_containers")
+  state.buf.items = scratch("cinder_terminal_items")
+  state.buf.hint = scratch("cinder_terminal_terminal", "hide")
+
+  state.win.frame = api.nvim_open_win(state.buf.frame, false, {
+    relative = "editor",
+    row = d.frame.row,
+    col = d.frame.col,
+    width = d.frame.width,
+    height = d.frame.height,
+    style = "minimal",
+    border = self.opts.border,
+    focusable = false,
+    zindex = 40,
   })
-
-  state.terminal = snacks().win({
-    show = false,
-    enter = false,
-    fixbuf = true,
-    minimal = true,
-    border = false,
-    buf = session.buf,
-    bo = {
-      bufhidden = "hide",
-    },
-    wo = {
-      number = false,
-      relativenumber = false,
-      signcolumn = "no",
-      statuscolumn = "",
-      wrap = false,
-      winbar = "",
-      cursorline = false,
-      winhighlight = table.concat({
-        "Normal:" .. self.highlights.normal,
-        "NormalNC:" .. self.highlights.normal,
-        "EndOfBuffer:" .. self.highlights.normal,
-      }, ","),
-    },
-    keys = {
-      q = false,
-    },
+  state.win.containers = api.nvim_open_win(state.buf.containers, true, {
+    relative = "win",
+    win = state.win.frame,
+    row = d.containers.row,
+    col = d.containers.col,
+    width = d.containers.width,
+    height = d.containers.height,
+    style = "minimal",
+    border = "none",
+    zindex = 50,
   })
-
-  state.layout = snacks().layout.new({
-    show = false,
-    layout = {
-      box = "horizontal",
-      width = self.opts.width or 0.88,
-      height = self.opts.height or 0.82,
-      border = self.opts.border or "rounded",
-      title = self.opts.title or " Terminal Sessions ",
-      title_pos = "center",
-      wo = {
-        winhighlight = table.concat({
-          "Normal:" .. self.highlights.normal,
-          "NormalNC:" .. self.highlights.normal,
-          "FloatBorder:" .. self.highlights.border,
-          "FloatTitle:" .. self.highlights.title,
-          "WinSeparator:" .. self.highlights.border,
-        }, ","),
-      },
-      { win = "sidebar", width = self.opts.sidebar_width or 32, border = "right" },
-      { win = "terminal", border = "none" },
-    },
-    wins = {
-      sidebar = state.sidebar,
-      terminal = state.terminal,
-    },
-    on_close = function()
-      state.layout = nil
-      state.sidebar = nil
-      state.terminal = nil
-      state.line_sessions = {}
-    end,
+  state.win.items = api.nvim_open_win(state.buf.items, false, {
+    relative = "win",
+    win = state.win.frame,
+    row = d.items.row,
+    col = d.items.col,
+    width = d.items.width,
+    height = d.items.height,
+    style = "minimal",
+    border = "none",
+    zindex = 50,
   })
-
-  state.layout:show()
-  self:refresh()
+  state.win.terminal = api.nvim_open_win(state.buf.hint, false, {
+    relative = "win",
+    win = state.win.frame,
+    row = d.terminal.row,
+    col = d.terminal.col,
+    width = d.terminal.width,
+    height = d.terminal.height,
+    style = "minimal",
+    border = "none",
+    zindex = 50,
+  })
+  for _, name in ipairs({ "frame", "containers", "items", "terminal" }) do
+    self:apply_window_options(state.win[name], name)
+  end
+  self:map_buffers()
 end
 
----@param session CinderTerminal.Session
----@param opts? {focus?: boolean, insert?: boolean}
-function M:activate_session(session, opts)
-  opts = opts or {}
-  self.sessions:set_current(session)
-  self:ensure_layout()
-  if self.state.terminal and self.state.terminal:win_valid() then
-    self.state.terminal:set_buf(session.buf)
-  end
-  self:refresh()
-  if opts.focus ~= false then
-    self:set_terminal_focus(opts.insert == true)
-  end
-end
-
----@param cwd? string
-function M:open(cwd)
-  if type(cwd) ~= "string" or cwd == "bottom" or cwd == "right" or cwd == "top" or cwd == "left" then
-    cwd = self.sessions:root()
-  end
-  local session = self.sessions:create(cwd)
-  self:activate_session(session, { focus = true, insert = true })
-  return session
-end
-
-function M:toggle()
-  if self:workspace_visible() and self.state.layout and self.state.layout:valid() then
-    self:close_workspace()
+function M:reflow()
+  if not self:is_open() then
     return
   end
-  self:activate_session(self.sessions:current_or_create(), { focus = true, insert = true })
-end
-
-function M:focus()
-  self:activate_session(self.sessions:current_or_create(), { focus = true, insert = false })
-end
-
-function M:focus_sidebar()
-  local session = self.sessions:current_or_create()
-  self.sessions:set_current(session)
-  self:ensure_layout()
-  self:refresh()
-  self:set_sidebar_focus()
-end
-
-function M:activate_sidebar_line()
-  local sidebar = self.state.sidebar
-  if not (sidebar and sidebar:win_valid()) then
-    return
-  end
-  local line = api.nvim_win_get_cursor(sidebar.win)[1]
-  local session_id = self.state.line_sessions[line]
-  if not session_id then
-    return
-  end
-  for _, session in ipairs(self.sessions:list()) do
-    if session.id == session_id then
-      self:activate_session(session, { focus = true, insert = false })
-      return
+  local state = self.state
+  local d = self:dimensions()
+  state.layout = d
+  for name, config in pairs({
+    frame = {
+      relative = "editor",
+      row = d.frame.row,
+      col = d.frame.col,
+      width = d.frame.width,
+      height = d.frame.height,
+    },
+    containers = {
+      row = d.containers.row,
+      col = d.containers.col,
+      width = d.containers.width,
+      height = d.containers.height,
+    },
+    items = { row = d.items.row, col = d.items.col, width = d.items.width, height = d.items.height },
+    terminal = { row = d.terminal.row, col = d.terminal.col, width = d.terminal.width, height = d.terminal.height },
+  }) do
+    local win = state.win[name]
+    if valid_win(win) then
+      if name ~= "frame" then
+        config.relative = "win"
+        config.win = state.win.frame
+      end
+      pcall(api.nvim_win_set_config, win, config)
     end
   end
 end
 
-function M:select()
-  local list = self.sessions:list()
-  if #list == 0 then
-    self:open()
+---The containers panel is sized from the number of containers, so it has to
+---grow or shrink when sessions appear or disappear. Without this the list keeps
+---the height it had when the workspace opened and quietly clips new entries.
+function M:fit_panels()
+  local state = self.state
+  if not state.layout then
     return
   end
-
-  vim.ui.select(list, {
-    prompt = "Terminal Session",
-    format_item = function(session)
-      local marker = session == self.sessions:current() and ">" or " "
-      return string.format(
-        "%s %d  %s  %s",
-        marker,
-        session.id,
-        session.status or "running",
-        self.sessions:title(session.cwd)
-      )
-    end,
-  }, function(session)
-    if session then
-      self:activate_session(session, { focus = true, insert = false })
-    end
-  end)
-end
-
-function M:add()
-  vim.ui.input({
-    prompt = "Terminal cwd: ",
-    default = self.sessions:root(),
-    completion = "dir",
-  }, function(value)
-    if not value or value == "" then
-      return
-    end
-    local cwd = self.sessions:normalize_dir(value)
-    if not cwd or fn.isdirectory(cwd) == 0 then
-      vim.notify("Invalid directory: " .. value, vim.log.levels.ERROR)
-      return
-    end
-    self:open(cwd)
-  end)
-end
-
-function M:copy_current()
-  local session
-  local terminal = self.state.terminal
-  if terminal and terminal:win_valid() and api.nvim_get_current_win() == terminal.win then
-    session = self.sessions:find_by_buf(api.nvim_win_get_buf(terminal.win))
+  if state.layout.containers.height ~= self:dimensions().containers.height then
+    self:reflow()
   end
-  session = session or self.sessions:current()
-  if not session then
-    return self:open()
-  end
-  return self:open(self.sessions:process_cwd(session) or session.cwd)
-end
-
-function M:close_workspace()
-  pcall(vim.cmd.stopinsert)
-  if self.state.layout then
-    self.state.layout:close()
-  end
-  self.state.layout = nil
-  self.state.sidebar = nil
-  self.state.terminal = nil
-  self.state.line_sessions = {}
-  self.state.refresh_pending = false
-end
-
-function M:close_current()
-  local session = self.sessions:current()
-  if not session then
-    return
-  end
-
-  local list = self.sessions:list()
-  local index
-  for i, item in ipairs(list) do
-    if item == session then
-      index = i
-      break
-    end
-  end
-
-  if #list == 1 then
-    if session.buf and api.nvim_buf_is_valid(session.buf) then
-      pcall(api.nvim_buf_delete, session.buf, { force = true })
-    end
-    self.sessions:remove(session)
-    self:close_workspace()
-    return
-  end
-
-  local next_session = list[((index or 1) % #list) + 1]
-  if next_session and next_session.buf and api.nvim_buf_is_valid(next_session.buf) then
-    self.sessions:set_current(next_session)
-    if self.state.terminal and self.state.terminal:win_valid() then
-      self.state.terminal:set_buf(next_session.buf)
-    end
-    self:refresh()
-    self:set_terminal_focus(false)
-  end
-
-  if session.buf and api.nvim_buf_is_valid(session.buf) then
-    pcall(api.nvim_buf_delete, session.buf, { force = true })
-  end
-  self.sessions:remove(session)
-  self:refresh()
-end
-
-function M:restart_current()
-  local session = self.sessions:current()
-  if not session then
-    return
-  end
-  local cwd = session.cwd
-  self:close_current()
-  self:open(cwd)
-end
-
-function M:next()
-  local list = self.sessions:list()
-  if #list == 0 then
-    self:open()
-    return
-  end
-  local session = self.sessions:current() or list[1]
-  local index
-  for i, item in ipairs(list) do
-    if item == session then
-      index = i
-      break
-    end
-  end
-  index = index or 1
-  self:activate_session(list[(index % #list) + 1], { focus = true, insert = false })
-end
-
-function M:prev()
-  local list = self.sessions:list()
-  if #list == 0 then
-    self:open()
-    return
-  end
-  local session = self.sessions:current() or list[1]
-  local index
-  for i, item in ipairs(list) do
-    if item == session then
-      index = i
-      break
-    end
-  end
-  index = index or 1
-  self:activate_session(list[((index - 2) % #list) + 1], { focus = true, insert = false })
 end
 
 function M:setup_autocmds()
-  if self.state.augroup then
+  local state = self.state
+  if state.augroup then
     return
   end
-  self.state.augroup = api.nvim_create_augroup("CinderTerminalUI", { clear = true })
-  api.nvim_create_autocmd({ "WinEnter", "BufEnter" }, {
-    group = self.state.augroup,
-    callback = function(ev)
-      local session = self.sessions:find_by_buf(ev.buf)
-      if not session then
-        return
+  state.augroup = api.nvim_create_augroup("CinderTerminalUI", { clear = true })
+
+  api.nvim_create_autocmd("CursorMoved", {
+    group = state.augroup,
+    callback = function()
+      local kind = self:kind_of_window(api.nvim_get_current_win())
+      if kind == "containers" or kind == "items" then
+        self:on_cursor_moved(kind)
       end
-      if api.nvim_get_current_win() == (self.state.terminal and self.state.terminal.win or -1) then
-        self.sessions:set_current(session)
-      end
-      self:refresh()
     end,
   })
+
+  api.nvim_create_autocmd("WinEnter", {
+    group = state.augroup,
+    callback = function()
+      self:sync_focus_from_window()
+    end,
+  })
+
+  api.nvim_create_autocmd("ModeChanged", {
+    group = state.augroup,
+    callback = function()
+      if not self:is_open() then
+        return
+      end
+      -- Track the pane's own mode, not the focus: the title has to keep
+      -- saying `normal` after the cursor moves back to a list.
+      local win = state.win.terminal
+      if valid_win(win) and api.nvim_get_current_win() == win then
+        state.terminal_insert = api.nvim_get_mode().mode == "t"
+      end
+      -- The pane carries its mode in the title and swaps the hint row between
+      -- insert and normal keys, so both have to follow the mode.
+      self:update_panel_chrome(state.win.terminal, "terminal")
+      self:render_frame()
+    end,
+  })
+
+  api.nvim_create_autocmd("VimResized", {
+    group = state.augroup,
+    callback = function()
+      if not self:is_open() then
+        return
+      end
+      self:reflow()
+      self:render()
+    end,
+  })
+
+  api.nvim_create_autocmd("ColorScheme", {
+    group = state.augroup,
+    callback = function()
+      if self:is_open() then
+        self:render()
+      end
+    end,
+  })
+
+  -- Closing one panel (`:q`, `:bd` on the terminal buffer, a window manager
+  -- quirk) would otherwise leave the workspace half alive: `is_open()` turns
+  -- false while the other windows stay on screen. Hiding the workspace keeps
+  -- every session alive and the next open rebuilds it.
+  api.nvim_create_autocmd("VimLeavePre", {
+    group = state.augroup,
+    callback = function()
+      state.shutting_down = true
+    end,
+  })
+
+  api.nvim_create_autocmd("WinClosed", {
+    group = state.augroup,
+    callback = function(args)
+      local win = tonumber(args.match)
+      if not win or not state.opened or state.shutting_down then
+        return
+      end
+      if not (self:kind_of_window(win) or state.win.frame == win) then
+        return
+      end
+      vim.schedule(function()
+        if state.opened and not self:is_open() then
+          self:close()
+        end
+      end)
+    end,
+  })
+end
+
+function M:start_timer()
+  local interval = self.opts.refresh_interval
+  if self.state.timer or not interval or interval <= 0 then
+    return
+  end
+  local uv = vim.uv or vim.loop
+  self.state.timer = uv.new_timer()
+  self.state.timer:start(
+    interval,
+    interval,
+    vim.schedule_wrap(function()
+      if self:is_open() then
+        self:refresh(false)
+      end
+    end)
+  )
+end
+
+function M:stop_timer()
+  local timer = self.state.timer
+  if not timer then
+    return
+  end
+  pcall(timer.stop, timer)
+  pcall(timer.close, timer)
+  self.state.timer = nil
+end
+
+---Let every provider make sure the first snapshot has something to show.
+---Providers are asked on every open and stay idempotent themselves, so a
+---terminal the user killed is not resurrected by reopening the workspace.
+function M:prepare_providers()
+  for _, provider in ipairs(self.providers or {}) do
+    if type(provider.prepare) == "function" then
+      provider:prepare()
+    end
+  end
+end
+
+function M:open()
+  local state = self.state
+  if self:is_open() then
+    self:set_focus(state.focus == "terminal" and "terminal" or "items", { insert = state.focus == "terminal" })
+    return
+  end
+  state.opened = true
+  state.message = nil
+  state.attached_item_id = nil
+  self:create_windows()
+  self:setup_autocmds()
+  self:start_timer()
+  self:prepare_providers()
+  self:refresh(true)
+  -- Open on the terminal when there is something to type into, otherwise land
+  -- on the items panel so `n` creates the first one.
+  local target = self:selected_item() and "terminal" or "items"
+  self:set_focus(target, { insert = target == "terminal" })
+end
+
+function M:close()
+  local state = self.state
+  if not state.opened then
+    return
+  end
+  state.opened = false
+  self:stop_timer()
+  state.attach_generation = state.attach_generation + 1
+  if state.attach_timer then
+    pcall(state.attach_timer.stop, state.attach_timer)
+    pcall(state.attach_timer.close, state.attach_timer)
+    state.attach_timer = nil
+  end
+  pcall(vim.cmd.stopinsert)
+  for _, win in pairs(state.win) do
+    if valid_win(win) then
+      pcall(api.nvim_win_close, win, true)
+    end
+  end
+  for _, buf in pairs(state.buf) do
+    if valid_buf(buf) then
+      pcall(api.nvim_buf_delete, buf, { force = true })
+    end
+  end
+  state.win, state.buf = {}, {}
+  state.layout = nil
+end
+
+function M:toggle()
+  if self:is_open() then
+    self:close()
+  else
+    self:open()
+  end
+end
+
+-- Selection ----------------------------------------------------------------
+
+---@return CinderTerminal.Node?
+function M:selected_container()
+  for _, container in ipairs(self.state.containers) do
+    if container.id == self.state.selected_container_id then
+      return container
+    end
+  end
+end
+
+---@return CinderTerminal.Node?
+function M:selected_item()
+  for _, item in ipairs(self.state.items) do
+    if item.id == self.state.selected_item_id then
+      return item
+    end
+  end
+end
+
+---Select the first container owned by `name`, waiting for the next snapshot
+---when the provider has not reported its data yet.
+---@param name string
+function M:select_provider(name)
+  for _, container in ipairs(self.state.containers) do
+    if container.provider == name then
+      self:select_container(container.id)
+      return true
+    end
+  end
+  self.state.pending_provider = name
+  self:refresh(true)
+  return false
+end
+
+---@param id string
+---@param opts? { focus?: boolean }
+function M:select_container(id, opts)
+  opts = opts or {}
+  local state = self.state
+  if state.selected_container_id == id and self:selected_container() then
+    return
+  end
+  state.selected_container_id = id
+  state.items = {}
+  state.selected_item_id = nil
+
+  local container = self:selected_container()
+  if container then
+    state.items = container.children or {}
+    local remembered = state.memory[id]
+    local preferred
+    for _, item in ipairs(state.items) do
+      if item.id == remembered or item.active then
+        preferred = item.id
+        break
+      end
+    end
+    state.selected_item_id = preferred or (state.items[1] and state.items[1].id or nil)
+    if state.selected_item_id then
+      state.memory[id] = state.selected_item_id
+    end
+  end
+
+  self:render()
+  if opts.focus then
+    self:set_focus("items")
+  end
+end
+
+---@param id string
+---@param opts? { attach?: boolean }
+function M:select_item(id, opts)
+  opts = opts or {}
+  local state = self.state
+  if state.selected_item_id == id then
+    return
+  end
+  state.selected_item_id = id
+  if state.selected_container_id then
+    state.memory[state.selected_container_id] = id
+  end
+  self:render_frame()
+  self:update_panel_chrome()
+  if opts.attach ~= false then
+    self:schedule_attach()
+  end
+end
+
+function M:ensure_selection()
+  local state = self.state
+  if not self:selected_container() then
+    local first = state.containers[1]
+    state.selected_container_id = first and first.id or nil
+    state.items = first and first.children or {}
+    state.selected_item_id = nil
+  else
+    local container = self:selected_container()
+    state.items = container.children or {}
+  end
+
+  if state.selected_item_id and not self:selected_item() then
+    state.selected_item_id = nil
+  end
+
+  if not state.selected_item_id then
+    local remembered = state.memory[state.selected_container_id]
+    local preferred
+    for _, item in ipairs(state.items) do
+      if item.id == remembered or item.active then
+        preferred = item.id
+        break
+      end
+    end
+    state.selected_item_id = preferred or (state.items[1] and state.items[1].id or nil)
+  end
+
+  -- While the terminal has focus tmux is the source of truth for which window
+  -- is on screen, so the item selection follows the active window.
+  if state.focus == "terminal" then
+    for _, item in ipairs(state.items) do
+      if item.active then
+        state.selected_item_id = item.id
+        break
+      end
+    end
+  end
+
+  if state.selected_item_id then
+    state.memory[state.selected_container_id] = state.selected_item_id
+  end
+end
+
+-- Rendering ----------------------------------------------------------------
+
+function M:render()
+  if not self:is_open() then
+    return
+  end
+  local state = self.state
+  local d = self:dimensions()
+  state.layout = d
+  state.rendering = true
+  self:render_frame()
+  self:render_containers()
+  self:render_items()
+  self:update_panel_chrome()
+  self:render_terminal()
+  state.rendering = false
+end
+
+function M:help_text()
+  local state = self.state
+  if state.message then
+    return " " .. display_text(state.message, state.layout and state.layout.inner_width - 2 or 80)
+  end
+  local parts = {}
+  for _, entry in ipairs(self:context_keys()) do
+    parts[#parts + 1] = "[" .. entry.key .. "] " .. entry.desc
+  end
+  local text = " " .. table.concat(parts, "  ") .. " "
+  if state.layout then
+    text = display_text(text, state.layout.inner_width)
+  end
+  return text
+end
+
+---Where the keyboard is right now, for `interaction`. An explicit `kind`
+---asks for one surface regardless of the focus, which is how the `?` popup
+---lists every context at once.
+---@param kind? "containers"|"items"|"pane"|"typing"
+---@return CinderTerminal.Interaction.Context
+function M:interaction_context(kind)
+  local state = self.state
+  local function sidebar(panel)
+    local node = panel == "containers" and self:selected_container() or self:selected_item()
+    local provider = self:provider(node or self:selected_container())
+    return {
+      surface = "sidebar",
+      panel = panel,
+      node = node,
+      provider = provider,
+      caps = (provider and provider.capabilities) or {},
+    }
+  end
+  local function pane(surface)
+    local provider = self:provider(self:selected_item())
+    return {
+      surface = surface,
+      provider = provider,
+      caps = (provider and provider.capabilities) or {},
+    }
+  end
+  if kind == "containers" or kind == "items" then
+    return sidebar(kind)
+  end
+  if kind == "pane" or kind == "typing" then
+    return pane(kind)
+  end
+  if state.focus == "terminal" then
+    return pane(self:terminal_normal_mode() and "pane" or "typing")
+  end
+  return sidebar(state.focus == "containers" and "containers" or "items")
+end
+
+---@param option string
+---@param defaults string[]
+---@return string[]
+function M:resolve_keys(option, defaults)
+  return self:keys_for(option, defaults)
+end
+
+---The hint row of the focused panel, straight out of `interaction`.
+---@return { key: string, desc: string, keys: string[], native: boolean }[]
+function M:context_keys()
+  return interaction.hints(self:interaction_context(), function(option, defaults)
+    return self:resolve_keys(option, defaults)
+  end)
+end
+
+---@param text string
+---@param level? string
+function M:notify(text, level)
+  if not text or text == "" then
+    return
+  end
+  self.state.message = text
+  self.state.message_level = level
+  self:render_frame()
+  vim.defer_fn(function()
+    if self.state.message == text then
+      self.state.message, self.state.message_level = nil, nil
+      if self:is_open() then
+        self:render_frame()
+      end
+    end
+  end, 5000)
+end
+
+function M:render_frame()
+  local state = self.state
+  local d = state.layout
+  local buf = state.buf.frame
+  if not d or not valid_buf(buf) then
+    return
+  end
+  local hl = self:highlights()
+
+  local rows = {}
+  for row = 0, d.inner_height - 1 do
+    rows[row + 1] = string.rep(" ", d.inner_width)
+  end
+
+  local sep = d.separator_col
+  local divider = d.divider_row
+  for row = 0, d.body_height - 1 do
+    local line = rows[row + 1]
+    rows[row + 1] = line:sub(1, sep) .. "│" .. line:sub(sep + 2)
+  end
+  rows[divider + 1] = string.rep("─", sep) .. "┤" .. rows[divider + 1]:sub(sep + 2)
+  rows[d.help_row + 1] = self:help_text()
+
+  set_lines(buf, rows)
+  api.nvim_buf_clear_namespace(buf, FRAME_NS, 0, -1)
+
+  for row = 0, d.body_height - 1 do
+    mark(buf, FRAME_NS, hl.border, row, sep, sep + 1, 10)
+  end
+  mark(buf, FRAME_NS, hl.border, divider, 0, sep + 1, 10)
+  mark(buf, FRAME_NS, state.message and hl.error or hl.help, d.help_row, 0, #rows[d.help_row + 1], 10)
+
+  -- The separator segment around the focused panel glows, the way lazygit
+  -- highlights the border of the active panel.
+  if state.focus == "containers" then
+    for row = 0, divider - 1 do
+      mark(buf, FRAME_NS, hl.title, row, sep, sep + 1, 20)
+    end
+    mark(buf, FRAME_NS, hl.title, divider, 0, sep + 1, 20)
+  elseif state.focus == "items" then
+    for row = divider + 1, d.body_height - 1 do
+      mark(buf, FRAME_NS, hl.title, row, sep, sep + 1, 20)
+    end
+    mark(buf, FRAME_NS, hl.title, divider, 0, sep + 1, 20)
+  elseif state.focus == "terminal" then
+    for row = 0, d.body_height - 1 do
+      mark(buf, FRAME_NS, hl.title, row, sep, sep + 1, 20)
+    end
+  end
+end
+
+function M:render_containers()
+  local state = self.state
+  local buf, win = state.buf.containers, state.win.containers
+  if not valid_buf(buf) then
+    return
+  end
+  local hl = self:highlights()
+  local width = valid_win(win) and api.nvim_win_get_width(win) or 30
+  local lines, ids = {}, {}
+
+  for index, node in ipairs(state.containers) do
+    local line, spans = compose({
+      { node.mark and (node.mark .. " ") or "  ", node.mark and hl.mark or nil },
+      { display_text(node.label, width - 4) },
+      { node.detail and ("  " .. node.detail) or "", hl.detail },
+    })
+    ids[index] = node.id
+    lines[#lines + 1] = { line, spans }
+  end
+  if #lines == 0 then
+    lines[1] = { "  no containers", { { hl.detail, 2, 15 } } }
+  end
+
+  local text, spans = {}, {}
+  state.line_ids.containers = {}
+  for row, entry in ipairs(lines) do
+    text[row] = entry[1]
+    spans[row] = entry[2]
+    if ids[row] then
+      state.line_ids.containers[row] = ids[row]
+    end
+  end
+
+  api.nvim_buf_clear_namespace(buf, CONTAINERS_NS, 0, -1)
+  set_lines(buf, text)
+  for row, row_spans in ipairs(spans) do
+    for _, span in ipairs(row_spans) do
+      mark(buf, CONTAINERS_NS, span[1], row - 1, span[2], span[3], 10)
+    end
+  end
+  self:focus_cursor("containers")
+end
+
+function M:render_items()
+  local state = self.state
+  local buf, win = state.buf.items, state.win.items
+  if not valid_buf(buf) then
+    return
+  end
+  local hl = self:highlights()
+  local width = valid_win(win) and api.nvim_win_get_width(win) or 30
+  local lines, ids = {}, {}
+
+  -- The digit is part of the list, not of the hint row: it says which key
+  -- reaches this terminal, and only the ten a digit can address wear one.
+  for index, node in ipairs(state.items) do
+    local digit = index <= 10 and ((index % 10) .. " ") or "  "
+    local line, spans = compose({
+      { digit, hl.detail },
+      { display_text(node.label, width - 4) },
+      { node.detail and ("  " .. node.detail) or "", detail_group(node, hl) },
+    })
+    ids[index] = node.id
+    lines[#lines + 1] = { line, spans }
+  end
+  if #lines == 0 then
+    local container = self:selected_container()
+    local provider = self:provider(container)
+    local hint = provider and provider.capabilities.create_terminal and "  n  new terminal" or "  empty"
+    lines[1] = { hint, { { hl.detail, 2, #hint } } }
+  end
+
+  local text, spans = {}, {}
+  state.line_ids.items = {}
+  for row, entry in ipairs(lines) do
+    text[row] = entry[1]
+    spans[row] = entry[2]
+    if ids[row] then
+      state.line_ids.items[row] = ids[row]
+    end
+  end
+
+  api.nvim_buf_clear_namespace(buf, ITEMS_NS, 0, -1)
+  set_lines(buf, text)
+  for row, row_spans in ipairs(spans) do
+    for _, span in ipairs(row_spans) do
+      mark(buf, ITEMS_NS, span[1], row - 1, span[2], span[3], 10)
+    end
+  end
+  self:focus_cursor("items")
+end
+
+function M:focus_cursor(kind)
+  local state = self.state
+  local win = state.win[kind]
+  if not valid_win(win) then
+    return
+  end
+  local id = kind == "containers" and state.selected_container_id or state.selected_item_id
+  local row
+  for line, value in pairs(state.line_ids[kind]) do
+    if value == id then
+      row = line
+      break
+    end
+  end
+  if not row then
+    return
+  end
+  local current = api.nvim_win_get_cursor(win)[1]
+  if current ~= row then
+    pcall(api.nvim_win_set_cursor, win, { row, 0 })
+  end
+end
+
+function M:kind_of_window(win)
+  for _, name in ipairs({ "containers", "items", "terminal" }) do
+    if self.state.win[name] == win then
+      return name
+    end
+  end
+end
+
+function M:sync_focus_from_window()
+  local state = self.state
+  if not self:is_open() then
+    return
+  end
+  local kind = self:kind_of_window(api.nvim_get_current_win())
+  if not kind or kind == state.focus then
+    return
+  end
+  state.focus = kind
+  state.rendering = true
+  self:update_panel_chrome()
+  self:render_frame()
+  if kind ~= "terminal" then
+    self:focus_cursor(kind)
+  end
+  state.rendering = false
+end
+
+---@param kind string
+---@param opts? { insert?: boolean }
+function M:set_focus(kind, opts)
+  opts = opts or {}
+  local state = self.state
+  if not self:is_open() then
+    return
+  end
+  if not valid_win(state.win[kind]) then
+    return
+  end
+  state.focus = kind
+  state.rendering = true
+  self:update_panel_chrome()
+  self:render_frame()
+  state.rendering = false
+
+  if kind == "terminal" then
+    api.nvim_set_current_win(state.win.terminal)
+    state.terminal_insert = opts.insert ~= false
+    if state.terminal_insert and vim.bo[api.nvim_win_get_buf(state.win.terminal)].buftype == "terminal" then
+      self:enter_terminal_insert()
+    end
+    return
+  end
+  pcall(vim.cmd.stopinsert)
+  api.nvim_set_current_win(state.win[kind])
+  self:focus_cursor(kind)
+end
+
+-- Terminal pane ------------------------------------------------------------
+
+---Hand the keyboard to the job. Headless Neovim cannot reach Terminal-Job
+---mode, so the tests spy on this instead of asserting the mode itself.
+function M:enter_terminal_insert()
+  pcall(vim.cmd.startinsert)
+end
+
+---Leave the job for normal mode, the way Neovim's own `<C-\><C-n>` does.
+function M:enter_terminal_normal()
+  local keys = api.nvim_replace_termcodes("<C-\\><C-n>", true, false, true)
+  pcall(api.nvim_feedkeys, keys, "n", false)
+end
+
+---Send raw bytes to the job. The mapping that calls this is buffer-local, so
+---the job is the one in the buffer the keys arrived in, not necessarily the
+---one on screen in the pane.
+---@param text string
+function M:send_to_job(text)
+  local buf = api.nvim_get_current_buf()
+  if vim.bo[buf].buftype ~= "terminal" then
+    local win = self.state.win.terminal
+    buf = valid_win(win) and api.nvim_win_get_buf(win) or nil
+  end
+  local channel = buf and vim.bo[buf].channel or nil
+  if channel and channel > 0 then
+    pcall(api.nvim_chan_send, channel, text)
+  end
+end
+
+---The `<Esc><Esc>` gesture, implemented through one `<Esc>`.
+---
+---Bound literally, `<Esc><Esc>` makes Neovim hold every lone `<Esc>` for
+---'timeoutlen' before the job receives it, and `<Esc>` is the key a TUI waits
+---for. The pane maps a single `<Esc>` instead: it forwards the byte right away
+---and only a second press inside `escape_window` leaves the job.
+---@see CinderTerminal.Interaction.Translation
+function M:terminal_escape()
+  local state = self.state
+  local now = (vim.uv or vim.loop).now()
+  local last = state.escape_at
+  if last and now - last <= (self.opts.escape_window or ESCAPE_WINDOW_MS) then
+    state.escape_at = nil
+    self:enter_terminal_normal()
+    return
+  end
+  state.escape_at = now
+  self:send_to_job("\27")
+end
+
+---@param buf number
+---@param title string
+function M:set_terminal_buffer(buf, title)
+  local state = self.state
+  local win = state.win.terminal
+  if not valid_win(win) then
+    return
+  end
+  state.terminal_title = title or ""
+  local previous = api.nvim_win_get_buf(win)
+  local had_terminal = valid_buf(previous) and vim.bo[previous].buftype == "terminal"
+  vim.wo[win].winfixbuf = false
+  if valid_buf(buf) and api.nvim_win_get_buf(win) ~= buf then
+    pcall(api.nvim_win_set_buf, win, buf)
+  end
+  vim.wo[win].winfixbuf = true
+  -- `show()` is asynchronous, so the pane can receive its first real terminal
+  -- after `set_focus` already decided to type into it. Without this the pane
+  -- would settle in normal mode and the first keystrokes would be commands
+  -- instead of shell input. A pane that already held a terminal keeps the
+  -- mode the user left it in.
+  if
+    not had_terminal
+    and state.focus == "terminal"
+    and state.terminal_insert
+    and valid_buf(buf)
+    and vim.bo[buf].buftype == "terminal"
+  then
+    self:enter_terminal_insert()
+  end
+  if valid_buf(buf) and not state.mapped_buffers[buf] then
+    state.mapped_buffers[buf] = true
+    self:map_terminal_buffer(buf)
+  end
+  self:update_panel_chrome(win, "terminal")
+end
+
+---True while the pane holds a job that Neovim currently drives in normal
+---mode, focused or not. The title uses it so the marker does not vanish when
+---the cursor moves to a list — that is still the mode the pane comes back in.
+---@return boolean
+function M:pane_normal_mode()
+  local state = self.state
+  local win = state.win.terminal
+  if not valid_win(win) then
+    return false
+  end
+  local buf = api.nvim_win_get_buf(win)
+  return vim.bo[buf].buftype == "terminal" and not state.terminal_insert
+end
+
+---True while the focused pane takes keys for the plugin instead of the job,
+---which is what the hint row has to follow.
+---@return boolean
+function M:terminal_normal_mode()
+  local state = self.state
+  if state.focus ~= "terminal" then
+    return false
+  end
+  local win = state.win.terminal
+  if not valid_win(win) then
+    return false
+  end
+  local buf = api.nvim_win_get_buf(win)
+  return vim.bo[buf].buftype == "terminal" and api.nvim_get_mode().mode ~= "t"
+end
+
+---Force the next render to re-show the selected terminal. Called after the
+---embedded tmux client exits.
+function M:invalidate_terminal()
+  self.state.attached_item_id = nil
+  self.state.attach_generation = self.state.attach_generation + 1
+  self:schedule_attach()
+end
+
+function M:schedule_attach()
+  local state = self.state
+  if state.attach_timer then
+    pcall(state.attach_timer.stop, state.attach_timer)
+    pcall(state.attach_timer.close, state.attach_timer)
+    state.attach_timer = nil
+  end
+  local uv = vim.uv or vim.loop
+  local timer = uv.new_timer()
+  state.attach_timer = timer
+  timer:start(
+    ATTACH_DEBOUNCE,
+    0,
+    vim.schedule_wrap(function()
+      pcall(timer.stop, timer)
+      pcall(timer.close, timer)
+      if state.attach_timer == timer then
+        state.attach_timer = nil
+      end
+      if self:is_open() then
+        self:attach_selected()
+      end
+    end)
+  )
+end
+
+function M:render_terminal()
+  local node = self:selected_item()
+  local id = node and node.id or nil
+  if id == self.state.attached_item_id then
+    return
+  end
+  self:schedule_attach()
+end
+
+---Show placeholder text in the terminal pane (no session, attach failure).
+---@param lines string[]
+function M:show_hint(lines)
+  local state = self.state
+  local buf = state.buf.hint
+  if not valid_buf(buf) then
+    buf = scratch("cinder_terminal_terminal", "hide")
+    state.buf.hint = buf
+    vim.bo[buf].modifiable = true
+  end
+  self:set_terminal_buffer(buf, "")
+  vim.bo[buf].modifiable = true
+  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+end
+
+function M:attach_selected()
+  local state = self.state
+  local node = self:selected_item()
+  local generation = state.attach_generation + 1
+  state.attach_generation = generation
+  local force = state.attach_force
+  state.attach_force = false
+
+  state.attached_item_id = node and node.id or nil
+  if not node then
+    self:show_hint({ "", "  select a terminal with l" })
+    return
+  end
+
+  local provider = self:provider(node)
+  if not provider then
+    return
+  end
+  provider:show(node, function(ok, buf, error)
+    if not self:is_open() or state.attach_generation ~= generation then
+      return
+    end
+    if not ok or not buf then
+      if error then
+        self:notify(error, "error")
+        self:show_hint({ "", "  " .. error })
+      end
+      return
+    end
+    local label = node.label
+    local container = self:selected_container()
+    if container and container.id ~= node.id then
+      label = container.label .. " › " .. node.label
+    end
+    self:set_terminal_buffer(buf, label)
+  end, { force = force })
+end
+
+-- Refresh ------------------------------------------------------------------
+
+function M:refresh(force)
+  local state = self.state
+  if not self:is_open() then
+    return
+  end
+  if state.refreshing then
+    state.refresh_queued = true
+    return
+  end
+  state.refreshing = true
+
+  local providers = self.providers
+  local index, results = 1, {}
+  local function step()
+    local provider = providers[index]
+    if not provider then
+      state.refreshing = false
+      if not self:is_open() then
+        state.refresh_queued = false
+        return
+      end
+      self:apply_snapshot(results)
+      if state.refresh_queued then
+        state.refresh_queued = false
+        vim.schedule(function()
+          self:refresh(true)
+        end)
+      end
+      return
+    end
+    index = index + 1
+    provider:snapshot(function(ok, containers, error)
+      results[provider.name] = { ok = ok, containers = containers or {}, error = error }
+      step()
+    end)
+  end
+  step()
+end
+
+---@param results table<string, { ok: boolean, containers: CinderTerminal.Node[], error?: string }>
+function M:apply_snapshot(results)
+  local state = self.state
+  local containers, errors = {}, {}
+  for _, provider in ipairs(self.providers) do
+    local result = results[provider.name]
+    if result and result.ok then
+      vim.list_extend(containers, result.containers)
+    elseif result and result.error then
+      errors[#errors + 1] = result.error
+    end
+  end
+  state.containers = containers
+
+  if state.pending_container then
+    for _, container in ipairs(containers) do
+      if container.id == state.pending_container then
+        state.selected_container_id = container.id
+        state.selected_item_id = nil
+        state.memory[container.id] = nil
+        state.pending_container = nil
+        break
+      end
+    end
+  end
+  if state.pending_item then
+    for _, container in ipairs(containers) do
+      for _, child in ipairs(container.children or {}) do
+        if child.id == state.pending_item then
+          state.selected_container_id = container.id
+          state.selected_item_id = child.id
+          state.pending_item = nil
+          break
+        end
+      end
+    end
+  end
+  if state.pending_provider then
+    for _, container in ipairs(containers) do
+      if container.provider == state.pending_provider then
+        state.selected_container_id = container.id
+        state.selected_item_id = nil
+        state.memory[container.id] = nil
+        break
+      end
+    end
+    state.pending_provider = nil
+  end
+
+  self:ensure_selection()
+  self:fit_panels()
+
+  if state.attached_item_id then
+    local alive = false
+    for _, node in ipairs(state.items) do
+      if node.id == state.attached_item_id then
+        alive = true
+        break
+      end
+    end
+    if not alive then
+      -- The pane content died with the terminal: re-attach so the placeholder
+      -- replaces it instead of leaving an empty panel behind.
+      self:invalidate_terminal()
+    end
+  end
+  self:render()
+  if #errors > 0 then
+    self:notify(table.concat(errors, "  "), "error")
+  end
+end
+
+-- Cursor -------------------------------------------------------------------
+
+---@param kind string
+function M:on_cursor_moved(kind)
+  local state = self.state
+  if state.rendering or not self:is_open() then
+    return
+  end
+  local win = state.win[kind]
+  if not valid_win(win) then
+    return
+  end
+  local row = api.nvim_win_get_cursor(win)[1]
+  local id = state.line_ids[kind][row]
+  if not id then
+    return
+  end
+  if kind == "containers" then
+    if id ~= state.selected_container_id then
+      self:select_container(id)
+    end
+  elseif id ~= state.selected_item_id then
+    self:select_item(id)
+  end
+end
+
+-- Actions ------------------------------------------------------------------
+
+---Keep the terminal pane alive when the buffer it shows is about to be
+---deleted: Neovim closes a `winfixbuf` window whose buffer disappears, which
+---would take the whole workspace with it.
+---@param buf? number
+function M:release_buffer(buf)
+  local state = self.state
+  if not buf or not api.nvim_buf_is_valid(buf) then
+    return
+  end
+  local win = state.win.terminal
+  if not valid_win(win) or api.nvim_win_get_buf(win) ~= buf then
+    return
+  end
+  self:show_hint({ "" })
+end
+
+---Buffer a provider would delete for `node`, if it owns one at all.
+---@param node? CinderTerminal.Node
+---@return number?
+function M:node_buffer(node)
+  local provider = self:provider(node)
+  if not provider or type(provider.buffer) ~= "function" then
+    return nil
+  end
+  return provider:buffer(node)
+end
+
+function M:action_open()
+  local state = self.state
+  if state.focus == "containers" then
+    self:set_focus("items")
+    return
+  end
+  if state.focus == "items" then
+    self:set_focus("terminal")
+  end
+end
+
+---@param delta number
+function M:move_selection(delta)
+  local state = self.state
+  local kind = state.focus == "containers" and "containers" or "items"
+  local list = kind == "containers" and state.containers or state.items
+  if #list == 0 then
+    return
+  end
+  local current = kind == "containers" and state.selected_container_id or state.selected_item_id
+  local index = 1
+  for i, node in ipairs(list) do
+    if node.id == current then
+      index = i
+      break
+    end
+  end
+  index = math.max(1, math.min(#list, index + delta))
+  local id = list[index].id
+  if kind == "containers" then
+    self:select_container(id)
+    self:focus_cursor("containers")
+  else
+    self:select_item(id)
+    self:focus_cursor("items")
+  end
+end
+
+function M:action_create()
+  local state = self.state
+  if state.focus == "containers" then
+    self:create_menu()
+    return
+  end
+  local container = self:selected_container()
+  local provider = self:provider(container)
+  if not container or not provider or not provider.capabilities.create_terminal then
+    return
+  end
+  provider:create_terminal(container, function(ok, id, error)
+    if not ok then
+      if error then
+        self:notify(error, "error")
+      end
+      return
+    end
+    if id then
+      state.pending_item = id
+    end
+    self:refresh(true)
+  end)
+end
+
+function M:create_menu()
+  local state = self.state
+  local cursor = self:selected_container()
+  local entries = {}
+  for _, provider in ipairs(self.providers) do
+    for _, entry in ipairs(self:menu_entries(provider)) do
+      entries[#entries + 1] = entry
+    end
+  end
+  if #entries == 0 then
+    return
+  end
+
+  local default
+  for _, entry in ipairs(entries) do
+    if cursor and entry.provider.name == cursor.provider then
+      default = entry
+      break
+    end
+  end
+  default = default or entries[1]
+
+  if #entries == 1 then
+    self:run_menu_entry(default)
+    return
+  end
+
+  vim.ui.select(entries, {
+    prompt = "Create",
+    format_item = function(entry)
+      return entry.label
+    end,
+  }, function(choice)
+    if choice then
+      self:run_menu_entry(choice)
+    end
+  end)
+end
+
+---@param provider CinderTerminal.Provider
+---@return table[]
+function M:menu_entries(provider)
+  local entries = {}
+  local labels = provider.create_labels or {}
+  if provider.capabilities.create_terminal and labels.terminal then
+    entries[#entries + 1] = { label = labels.terminal, kind = "terminal", provider = provider }
+  end
+  if provider.capabilities.create_container and labels.container then
+    entries[#entries + 1] = { label = labels.container, kind = "container", provider = provider }
+  end
+  return entries
+end
+
+---@param entry table
+function M:run_menu_entry(entry)
+  local state = self.state
+  local provider = entry.provider
+  local function done(ok, id, error)
+    if not ok then
+      if error then
+        self:notify(error, "error")
+      end
+      return
+    end
+    if id then
+      state.pending_container = id
+    end
+    self:refresh(true)
+  end
+
+  if entry.kind == "container" then
+    provider:create_container(done)
+    return
+  end
+  local container = self:selected_container()
+  if container and container.provider == provider.name then
+    provider:create_terminal(container, done)
+    return
+  end
+  local root = provider.container_id
+  provider:create_terminal({ id = root or provider.name, kind = "container", provider = provider.name }, done)
+end
+
+function M:action_kill()
+  local state = self.state
+  local node, provider
+  if state.focus == "containers" then
+    node = self:selected_container()
+    provider = self:provider(node)
+    if provider and not provider.capabilities.kill_container then
+      self:notify("this container cannot be killed", "error")
+      return
+    end
+  else
+    node = self:selected_item()
+    provider = self:provider(node or self:selected_container())
+    if provider and not provider.capabilities.kill_terminal then
+      self:notify("this terminal cannot be killed", "error")
+      return
+    end
+  end
+  if not node or not provider then
+    return
+  end
+  if node.locked then
+    self:notify(node.locked, "error")
+    return
+  end
+
+  local prompt = node.kind == "container" and string.format('Kill "%s" and every terminal inside it?', node.label)
+    or string.format('Kill "%s"?', node.label)
+  if self.opts.confirm ~= false and fn.confirm(prompt, "&Yes\n&No", 2) ~= 1 then
+    return
+  end
+
+  self:release_buffer(self:node_buffer(node))
+  provider:kill(node, function(ok, error)
+    if not ok then
+      if error then
+        self:notify(error, "error")
+      end
+      return
+    end
+    if state.selected_item_id == node.id then
+      state.selected_item_id = nil
+    end
+    if state.selected_container_id == node.id then
+      state.selected_container_id = nil
+      state.items = {}
+    end
+    self:refresh(true)
+  end)
+end
+
+function M:action_rename()
+  local state = self.state
+  local is_container = state.focus == "containers"
+  local node = is_container and self:selected_container() or self:selected_item()
+  local provider = self:provider(node or self:selected_container())
+  if not node or not provider then
+    return
+  end
+
+  if provider.capabilities.restart_terminal and not provider.capabilities.rename_terminal and not is_container then
+    self:restart_node(node, provider)
+    return
+  end
+
+  local can_rename = is_container and provider.capabilities.rename_container
+    or (not is_container and provider.capabilities.rename_terminal)
+  if not can_rename then
+    self:notify("this entry cannot be renamed", "error")
+    return
+  end
+
+  vim.ui.input({ prompt = "Rename: ", default = node.label }, function(value)
+    if not value or value == "" or value == node.label or not self:is_open() then
+      return
+    end
+    provider:rename(node, value, function(ok, error)
+      if not ok and error then
+        self:notify(error, "error")
+      end
+      self:refresh(true)
+    end)
+  end)
+end
+
+---Restart the selected terminal in place. Providers that own a buffer hand a
+---fresh one over, so the pane is released first.
+---@param node? CinderTerminal.Node
+---@param provider? CinderTerminal.Provider
+function M:restart_node(node, provider)
+  node = node or self:selected_item()
+  provider = provider or self:provider(node)
+  if not node or not provider or not provider.capabilities.restart_terminal then
+    return
+  end
+  self:release_buffer(self:node_buffer(node))
+  provider:restart(node, function(ok, error)
+    if not ok and error then
+      self:notify(error, "error")
+    end
+    self:refresh(true)
+  end)
+end
+
+---User pressed refresh: re-read every provider and force one re-attach, which
+---is also how a backed-off tmux client gets retried.
+function M:action_refresh()
+  self.state.attach_force = true
+  self:invalidate_terminal()
+  self:refresh(true)
+end
+
+function M:action_close()
+  self:close()
+end
+
+---Jump to the n-th terminal of the selected container and hand it the
+---keyboard: switching windows is what the list is for, and a digit is the
+---shortest path from "typing in shell 1" to "typing in shell 3". The digits
+---are the ones printed beside the rows, so `0` is the tenth.
+---@param key string
+function M:action_switch(key)
+  local state = self.state
+  local index = tonumber(key)
+  if not index then
+    return
+  end
+  if index == 0 then
+    index = 10
+  end
+  local node = state.items[index]
+  if not node then
+    self:notify(("no terminal %d"):format(index))
+    return
+  end
+  self:select_item(node.id)
+  self:focus_cursor("items")
+  self:set_focus("terminal")
+end
+
+---Tab: swap the sidebar and the pane.
+---
+---The containers panel is deliberately not a stop. A terminal is nearly always
+---picked from the list of the container that is already selected, so a cycle
+---that stopped on the container tree first made every Tab pay for a panel the
+---user rarely changes. The tree is still walked directly: `h` goes up to the
+---containers, `l` comes back down to the list.
+function M:action_cycle()
+  if self.state.focus == "terminal" then
+    self:set_focus("items")
+    return
+  end
+  self:set_focus("terminal", { insert = true })
+end
+
+function M:show_help()
+  local hl = self:highlights()
+  local resolve = self:resolver()
+  -- One row per action, spelled the way the popup spells keys: hint rows may
+  -- shorten a list, the popup has room for every key.
+  local function keys_of(name, fallback)
+    return interaction.keys_label(name, { surface = "sidebar" }, resolve) or fallback
+  end
+  -- Escape keys first: they are the way out of the mode the pane opens in.
+  local terminal_rows = interaction.help_rows(self:interaction_context("typing"), resolve)
+  vim.list_extend(terminal_rows, interaction.help_rows(self:interaction_context("pane"), resolve))
+  local sections = {
+    { "Containers", interaction.help_rows(self:interaction_context("containers"), resolve) },
+    { "Terminals", interaction.help_rows(self:interaction_context("items"), resolve) },
+    { "Terminal", terminal_rows },
+    {
+      "Global",
+      {
+        { key = keys_of("cycle", "<Tab>"), desc = "swap the sidebar and the terminal" },
+        { key = keys_of("hide_global", "<C-/>"), desc = "hide workspace" },
+        { key = keys_of("refresh", "R"), desc = "refresh" },
+        { key = "?", desc = "close this help" },
+      },
+    },
+  }
+
+  local lines, spans = {}, {}
+  for index, section in ipairs(sections) do
+    if index > 1 then
+      lines[#lines + 1] = ""
+      spans[#spans + 1] = {}
+    end
+    lines[#lines + 1] = "  " .. section[1]
+    spans[#spans + 1] = { { hl.title, 2, #("  " .. section[1]) } }
+    for _, row in ipairs(section[2]) do
+      local line, row_spans = compose({
+        { "    " .. row.key },
+        { string.rep(" ", math.max(2, 14 - #row.key)) },
+        { row.desc, hl.detail },
+      })
+      lines[#lines + 1] = line
+      spans[#spans + 1] = row_spans
+    end
+  end
+
+  local width, height = 46, #lines + 2
+  local buf = scratch("cinder_terminal_help")
+  vim.bo[buf].modifiable = true
+  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  local namespace = api.nvim_create_namespace("CinderTerminal.Help")
+  for row, row_spans in ipairs(spans) do
+    for _, span in ipairs(row_spans) do
+      mark(buf, namespace, span[1], row - 1, span[2], span[3], 10)
+    end
+  end
+
+  local columns, rows = vim.o.columns, vim.o.lines - vim.o.cmdheight
+  local win = api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = math.max(0, math.floor((rows - height) / 2)),
+    col = math.max(0, math.floor((columns - width) / 2)),
+    width = width,
+    height = height,
+    style = "minimal",
+    border = self.opts.border,
+    title = " Keys ",
+    title_pos = "center",
+    zindex = 60,
+  })
+  vim.wo[win].winhighlight = table.concat({
+    "Normal:" .. hl.normal,
+    "FloatBorder:" .. hl.border,
+    "FloatTitle:" .. hl.title,
+  }, ",")
+  local function close_help()
+    if api.nvim_win_is_valid(win) then
+      pcall(api.nvim_win_close, win, true)
+    end
+    if self:is_open() and valid_win(self.state.win[self.state.focus] or -1) then
+      api.nvim_set_current_win(self.state.win[self.state.focus])
+    end
+  end
+  for _, key in ipairs({ "q", "<Esc>", "?" }) do
+    vim.keymap.set("n", key, close_help, { buffer = buf, silent = true, nowait = true, desc = "Close help" })
+  end
+end
+
+-- Keymaps ------------------------------------------------------------------
+
+---@param buf number
+---@param mode string
+---@param lhs string?
+---@param rhs function
+---@param desc string
+function M:map(buf, mode, lhs, rhs, desc)
+  if not lhs then
+    return
+  end
+  vim.keymap.set(mode, lhs, rhs, { buffer = buf, silent = true, nowait = true, desc = desc })
+end
+
+function M:map_buffers()
+  local state = self.state
+  for _, panel in ipairs(PANELS) do
+    self:map_surface(state.buf[panel], "n", interaction.bindings("sidebar", panel, self:resolver()))
+  end
+  self:map_surface(state.buf.hint, "n", interaction.bindings("pane", nil, self:resolver()))
+end
+
+---@return fun(option: string, defaults: string[]): string[]
+function M:resolver()
+  local ui = self
+  return function(option, defaults)
+    return ui:resolve_keys(option, defaults)
+  end
+end
+
+---Bind one surface's actions into a buffer. Each binding names the key to
+---map (`lhs`) and, when the gesture and the mapping differ, its own handler.
+---@param buf number
+---@param mode string
+---@param bindings CinderTerminal.Interaction.Binding[]
+function M:map_surface(buf, mode, bindings)
+  for _, binding in ipairs(bindings) do
+    local action = binding.action
+    local rhs
+    if binding.run then
+      rhs = function()
+        binding.run(self, binding.gesture)
+      end
+    elseif action.rhs then
+      rhs = action.rhs
+    else
+      rhs = function()
+        action.run(self, binding.gesture)
+      end
+    end
+    self:map(buf, mode, binding.lhs, rhs, action.summary or action.name)
+  end
+end
+
+---Keys configured for one action. The option takes a single key, a list (a
+---pane may want more than one way out of Terminal mode) or `false` to disable
+---the action; the fallback applies when nothing is configured.
+---@param name string
+---@param fallback string|string[]
+---@return string[]
+function M:keys_for(name, fallback)
+  local configured = self.opts.keymaps and self.opts.keymaps[name]
+  if configured == nil then
+    configured = fallback
+  end
+  if configured == false then
+    return {}
+  end
+  local list = type(configured) == "table" and configured or { configured }
+  local keys = {}
+  for _, lhs in ipairs(list) do
+    if type(lhs) == "string" and lhs ~= "" then
+      keys[#keys + 1] = lhs
+    end
+  end
+  return keys
+end
+
+---@param buf number
+function M:map_terminal_buffer(buf)
+  -- Normal mode of the pane is the same surface as the placeholder buffer, so
+  -- `q`, `h` and the pane keys mean the same thing whether or not a job is on
+  -- screen. Terminal mode keeps only the escape sequences the registry
+  -- declares; Neovim's own `<C-\><C-n>` waits for a second key and reads as
+  -- "the key does nothing", so the pane binds each one on its own.
+  self:map_surface(buf, "n", interaction.bindings("pane", nil, self:resolver()))
+  self:map_surface(buf, "t", interaction.bindings("typing", nil, self:resolver()))
 end
 
 return M

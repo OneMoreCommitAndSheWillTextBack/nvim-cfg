@@ -13,7 +13,14 @@ local M = {}
 ---@field sidebar string Session list background.
 ---@field selected string Selected row in the session list.
 ---@field border string Outer border and internal separator.
----@field title string Workspace title.
+---@field title string Focused panel title and the glowing separator.
+---@field title_inactive string Unfocused panel title.
+---@field selected string Selected row of the focused panel.
+---@field selected_inactive string Selected row of an unfocused panel.
+---@field help string Contextual key hint row.
+---@field mark string Container type letter, such as `T` or `D`.
+---@field detail string Secondary row text.
+---@field error string Failed terminals and error messages.
 ---@type CinderTerminal.HighlightGroups
 M.groups = {
   normal = "CinderTerminal.Normal",
@@ -21,6 +28,12 @@ M.groups = {
   selected = "CinderTerminal.Selected",
   border = "CinderTerminal.Border",
   title = "CinderTerminal.Title",
+  title_inactive = "CinderTerminal.TitleInactive",
+  selected_inactive = "CinderTerminal.SelectedInactive",
+  help = "CinderTerminal.Help",
+  mark = "CinderTerminal.Mark",
+  detail = "CinderTerminal.Detail",
+  error = "CinderTerminal.Error",
 }
 
 local defaults = {
@@ -29,11 +42,51 @@ local defaults = {
   [M.groups.selected] = "CursorLine",
   [M.groups.border] = "FloatBorder",
   [M.groups.title] = "FloatTitle",
+  [M.groups.title_inactive] = "Comment",
+  [M.groups.selected_inactive] = "CursorLine",
+  [M.groups.help] = "Comment",
+  [M.groups.mark] = "Special",
+  [M.groups.detail] = "Comment",
+  [M.groups.error] = "DiagnosticError",
 }
 
 local theme_callbacks = {}
 local configured_overrides = {}
 local configured = false
+
+---@param first integer 0xRRGGBB
+---@param second integer 0xRRGGBB
+---@param ratio number 0 keeps `first`, 1 gives `second`
+---@return integer
+local function blend(first, second, ratio)
+  local result = 0
+  for index = 0, 2 do
+    local weight = 256 ^ index
+    local a = math.floor(first / weight) % 256
+    local b = math.floor(second / weight) % 256
+    local value = math.floor(a + (b - a) * ratio + 0.5) % 256
+    result = result + value * weight
+  end
+  return result
+end
+
+---@param name string
+---@return table
+local function resolved(name)
+  return vim.api.nvim_get_hl(0, { name = name, link = false })
+end
+
+---The focused panel keeps 'CursorLine'; a half faded cursorline in the
+---unfocused panels is the lazygit "which pane has the cursor" cue. Colorschemes
+---without a cursorline background keep the plain link.
+local function apply_inactive_cursorline()
+  local normal = resolved("Normal")
+  local cursorline = resolved("CursorLine")
+  if type(normal.bg) ~= "number" or type(cursorline.bg) ~= "number" then
+    return
+  end
+  vim.api.nvim_set_hl(0, M.groups.selected_inactive, { bg = blend(cursorline.bg, normal.bg, 0.55) })
+end
 
 local function apply_defaults()
   -- Do not use `default = true`: refresh must remove colors from the previous
@@ -41,6 +94,7 @@ local function apply_defaults()
   for group, link in pairs(defaults) do
     vim.api.nvim_set_hl(0, group, { link = link })
   end
+  apply_inactive_cursorline()
 end
 
 ---@param overrides? table<string, vim.api.keyset.highlight|string>
