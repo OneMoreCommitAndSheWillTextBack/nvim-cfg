@@ -115,7 +115,7 @@ root 最后一层和 marker 必须分别是真实目录、普通文件，不能�
 | `M.attach(root, path, opts?)` | `Folder` | 读取已有工作区，解析输入路径和 alias，path 为 nil 时取当前 cwd；先检查 alias 冲突再按真实目标去重，返回已有项或创建一个链接 |
 | `M.detach(root, name)` | `true` | 验证 root/marker 和 alias；链接不存在时成功，存在时只允许 unlink 符号链接 |
 | `M.validate_folders(folders)` | `Folder[]`：新的规范化数组 | 校验 alias、目标（目录或文件）及重复名称/真实路径；将目标转成 realpath，不修改输入数组、不写磁盘 |
-| `resolve_base()`（私有） | `string`：绝对 base | 按 CINDER_WORKSPACE/HOME 规则解析并验证已有基础目录，不创建目录 |
+| `resolve_base()`（私有） | `string`：绝对 base | 非空 CINDER_WORKSPACE 交给 validate_base；否则使用默认目录 `/tmp/.cinder-workspace`，缺失时按 0755 创建 |
 | `validate_name(name, is_alias?)`（私有） | `true` | 检查单层安全名称；is_alias 为 true 时额外拒绝 marker 保留名称 |
 | `resolve_target(path, alias?)`（私有） | `Folder` | alias 缺省时先取输入路径的 basename，再展开、规范化并解析 realpath，目标可以是目录或文件，最后校验得到的 alias |
 | `rollback_created(root, links, marker_created)`（私有） | `true` | links 为本次成功创建的 Folder 数组；只撤销仍匹配的链接、本次 marker 和空 root，失败返回含残留路径的错误 |
@@ -279,7 +279,8 @@ keys = {
 验收：
 
 - attach 默认 alias、自定义 alias、重复真实路径和同名冲突符合 des。
-- 非空无效 CINDER_WORKSPACE 不回退 HOME，已有 root 不覆盖。
+- 非空无效 CINDER_WORKSPACE 不回退默认目录；未设置或为空时使用
+  `/tmp/.cinder-workspace`（缺失则按 0755 创建），已有 root 不覆盖。
 - 空名称、`.`、`..`、路径穿越和 marker alias 被拒绝，`rtl.v2` 正常使用。
 - 相对路径、`~`、含空格路径正确解析；目标本身是符号链接时绑定到 realpath。
 - detach 失效链接或重复 detach 都安全；同名真实文件/目录被保留。

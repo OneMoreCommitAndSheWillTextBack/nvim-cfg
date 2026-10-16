@@ -15,7 +15,8 @@ workspace.attach("~/project/simulator")
 ```
 
 Set `CINDER_WORKSPACE` to an existing absolute directory to choose the parent
-for new workspaces. If it is empty, `HOME` is used.
+for new workspaces. If it is unset or empty, `/tmp/.cinder-workspace` is used
+and created on demand.
 
 The `:CinderWorkspace` command dispatches `new`, `open`, `attach`, `detach`,
 `close`, `list`, `export`, and `import`.

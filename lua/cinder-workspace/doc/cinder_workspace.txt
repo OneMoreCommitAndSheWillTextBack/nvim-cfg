@@ -108,14 +108,12 @@ For |cinder-workspace.new()| and |cinder-workspace.import()|:
 
     CINDER_WORKSPACE
         Non-empty absolute path to an existing accessible directory. An
-        invalid value is an error and does not fall back to HOME.
+        invalid value is an error and does not fall back to the default
+        directory.
 
-    HOME
-        Used only when CINDER_WORKSPACE is unset or empty. It must also be an
-        existing accessible absolute directory.
-
-The plugin never creates the base directory or uses a temporary directory as
-a fallback.
+When CINDER_WORKSPACE is unset or empty the base is /tmp/.cinder-workspace.
+That default is created with mode 0755 when missing and must be a directory
+when present. A base given by CINDER_WORKSPACE is never created.
 
 ==============================================================================
 vim:tw=78:ts=8:sw=4:et:ft=help:norl:

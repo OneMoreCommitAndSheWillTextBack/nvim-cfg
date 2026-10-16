@@ -5,6 +5,7 @@ local M = {}
 local MARKER_NAME = ".cinder-workspace"
 local MARKER_PLUGIN = "cinder-workspace"
 local MARKER_VERSION = 1
+local DEFAULT_BASE = "/tmp/.cinder-workspace"
 local DIRECTORY_MODE = 493 -- 0755
 local FILE_MODE = 420 -- 0644
 
@@ -130,13 +131,29 @@ local function validate_base(path, variable_name)
   return normalized
 end
 
+local function ensure_default_base()
+  local stat = uv.fs_stat(DEFAULT_BASE)
+  if not stat then
+    local made, mkdir_err = uv.fs_mkdir(DEFAULT_BASE, DIRECTORY_MODE)
+    if not made then
+      local existing = uv.fs_stat(DEFAULT_BASE)
+      if not existing or existing.type ~= "directory" then
+        return fail("无法创建默认工作区目录 %s：%s", DEFAULT_BASE, tostring(mkdir_err))
+      end
+    end
+  elseif stat.type ~= "directory" then
+    return fail("默认工作区路径不是目录：%s", DEFAULT_BASE)
+  end
+  return validate_base(DEFAULT_BASE, "默认工作区目录")
+end
+
 local function resolve_base()
   local cinder_workspace = vim.env.CINDER_WORKSPACE
   if type(cinder_workspace) == "string" and cinder_workspace ~= "" then
     return validate_base(cinder_workspace, "CINDER_WORKSPACE")
   end
 
-  return "/tmp/.cinder-workspace"
+  return ensure_default_base()
 end
 
 local function marker_content()

@@ -25,11 +25,13 @@ JSON 只用于显式导入、导出快照。三者之间没有后台同步。
 
 `new/import` 在 `<workspace-base>/<name>` 创建工作区。base 按以下规则解析：
 
-1. 非空 `CINDER_WORKSPACE` 优先；只有它未设置或为空时才使用 `HOME`。
+1. 非空 `CINDER_WORKSPACE` 优先；只有它未设置或为空时才使用默认目录
+   `/tmp/.cinder-workspace`。
 2. 选中的值必须是绝对路径、已存在且可访问的目录。
-3. 非空但无效的 `CINDER_WORKSPACE` 直接报错，不回退 HOME。
+3. 非空但无效的 `CINDER_WORKSPACE` 直接报错，不回退默认目录。
 
-插件不创建 base，不使用其他兜底路径。创建操作仍需处理权限不足等实际失败。
+插件不创建 `CINDER_WORKSPACE` 指定的 base；默认目录 `/tmp/.cinder-workspace`
+缺失时按 0755 创建，存在但不是目录则报错。创建操作仍需处理权限不足等实际失败。
 `open(root)` 使用调用者明确给出的路径，不依赖 base 环境变量。
 open/export/import 的输入路径支持 `~`，相对路径按调用时 cwd 解析。
 
