@@ -8,14 +8,14 @@ workspace is one card tree in a single buffer, and the pane's real terminal
 window covers the content area of the card it belongs to.
 
 ```text
-╭─Containers──────────────╮╭─Terminal────────────────────────────────────╮
+╭─Containers──────────────╮╭─[insert]─Terminal───────────────────────────╮
 │  local  1 shell         ││                                             │
 ╰─────────────────────────╯│                                             │
 ╭─local───────────────────╮│                                             │
 │1 ~/Code/task/nvim-c...  ││                                             │
 │                         ││                                             │
 ╰─────────────────────────╯╰─────────────────────────────────────────────╯
- [C-\ / Esc Esc] normal mode  [C-b] items  [C-/] hide
+ [C-\ / Esc Esc] normal mode │ [C-b] items │ [C-/] hide
 ```
 
 Two providers supply the rows:
@@ -99,11 +99,12 @@ Neovim and is the one to use when the job must not see an `<Esc>` at all.
 `false` to keep only Neovim's own sequence), so a pane that needs `<C-\>`
 literally — a nested editor — can turn it off.
 
-The pane looks identical in both modes, so the title gains `normal`, and the
-hint row only ever names keys that really work right now: while typing it shows
-the escape keys and the way back to the list (`<C-b>`), never `<Tab>` or `?`,
-which the job would receive as input instead. In normal mode it shows the
-pane's own keys — the same `<C-b>`, plus `<Tab>`.
+The pane looks identical in both modes, so the terminal card wears a badge
+naming the one the keys go to (`insert` while the job has them, `normal` while
+the pane is Neovim's), and the hint row only ever names keys that really work
+right now: while typing it shows the escape keys and the way back to the list
+(`<C-b>`), never `<Tab>` or `?`, which the job would receive as input instead.
+In normal mode it shows the pane's own keys — the same `<C-b>`, plus `<Tab>`.
 
 Killing or restarting the terminal shown in the right panel never takes the
 workspace down with it: the pane is released before the old buffer goes away,

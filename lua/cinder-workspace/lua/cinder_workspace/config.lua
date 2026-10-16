@@ -283,15 +283,18 @@ function M.write(path, document)
   end
 
   if vim.env.CINDER_WORKSPACE ~= nil then
-    local list_path = vim.env.CINDER_WORKSPACE.."/workspace-list.txt"
-    local fd, open_err = uv.fs_open(list_path, "a", 0)
+    local list_path = vim.env.CINDER_WORKSPACE .. "/workspace-list.txt"
+    -- `mode` 只在文件被创建时生效；之前的 0 会让新文件以 0000 落盘，
+    -- 于是第二次 append 一律 EACCES。
+    local fd, open_err = uv.fs_open(list_path, "a", FILE_MODE)
     if not fd then
-      return fail("无法代开list文件 %s：%s", list_path, tostring(open_err))
+      return fail("无法打开list文件 %s：%s", list_path, tostring(open_err))
     end
     local record = vim.json.encode({ name = document.name, path = normalized })
     local content = record .. "\n"
     local written_list, write_err_list = uv.fs_write(fd, content)
     if not written_list or written_list ~= #content then
+      uv.fs_close(fd)
       return fail("无法写入list文件 %s：%s", list_path, tostring(write_err_list))
     end
     uv.fs_close(fd)

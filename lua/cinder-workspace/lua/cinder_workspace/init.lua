@@ -87,9 +87,10 @@ function M.export(path)
     return nil, folders_err
   end
 
-  -- allow nil path
+  -- 无参 export 时落到 CINDER_WORKSPACE 下并按工作区名命名快照
+  -- （这里必须拼出文件路径：config.write 只接受普通文件目标）。
   if path == nil and vim.env.CINDER_WORKSPACE ~= nil then
-    path = vim.env.CINDER_WORKSPACE
+    path = vim.fs.joinpath(vim.env.CINDER_WORKSPACE, snapshot.name .. ".json")
   end
 
   return config.write(path, {

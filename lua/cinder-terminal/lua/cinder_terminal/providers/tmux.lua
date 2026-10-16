@@ -280,7 +280,10 @@ end
 ---@param cb fun(ok: boolean, buf?: number, error?: string)
 function M:restart(session_id, window_id, cb)
   if uv.now() < (self.client.retry_at or 0) then
-    cb(false, nil, nil)
+    -- Backing off on purpose: the pane still shows the last output and the
+    -- banner already explained the first failure, so this attempt reports
+    -- nothing at all instead of repeating itself every poll.
+    cb(false, nil, providers.SILENT)
     return
   end
   if running(self.client.job) then
@@ -294,7 +297,11 @@ function M:restart(session_id, window_id, cb)
   local buf = self:ensure_buffer()
   local job, failure
   api.nvim_buf_call(buf, function()
-    local ok, result = pcall(vim.fn.termopen, self.tmux:attach_command(session_id), {
+    -- `jobstart` with `term = true` is the non-deprecated spelling of
+    -- `termopen` (0.12): the job is attached to the buffer the call runs in and
+    -- `on_exit` keeps its signature.
+    local ok, result = pcall(vim.fn.jobstart, self.tmux:attach_command(session_id), {
+      term = true,
       on_exit = function(_, code, event)
         -- `event` is the string "exit" for plain jobs and the collected output
         -- lines for a pty; `exit_reason` accepts either shape.
@@ -359,9 +366,9 @@ function M:new_client_buffer()
   return buf
 end
 
----`termopen` refuses a buffer that already went through a terminal job, and a
----dead client leaves `buftype=terminal` plus its scrollback behind, so every
----start gets a clean buffer. The previous one is swept once nothing shows it.
+---A terminal job refuses a buffer that already went through one, and a dead
+---client leaves `buftype=terminal` plus its scrollback behind, so every start
+---gets a clean buffer. The previous one is swept once nothing shows it.
 ---@return number
 function M:ensure_buffer()
   local buf = self.client.buf
@@ -473,7 +480,8 @@ function M:create_container(cb)
 
   vim.ui.input({ prompt = "tmux session name: ", default = base }, function(value)
     if value == nil then
-      cb(false, nil, nil)
+      -- The prompt was dismissed, not failed.
+      cb(false, nil, providers.SILENT)
       return
     end
     value = value:gsub("%s+$", "")

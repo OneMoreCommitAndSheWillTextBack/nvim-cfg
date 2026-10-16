@@ -170,7 +170,7 @@
 | 成功返回 | `true`（工作区已打开/重建并选中） |
 | 失败返回 | `nil, err` |
 | 分支规则 | 1) `entry.root ~= nil` 且 `uv.fs_stat(root)` 存在 → `api.open(root)`，失败即返回该 err（**绝不落 import**）；2) 否则 `entry.snapshot ~= nil` → `api.import(snapshot)`；3) 都不可用 → `nil, "该记录既无可用 root 也无可用快照"` |
-| 动机 | `view.create` 现为"同名 root 删除重建"，只有 root 确实不存在才允许 import，防止权限/损坏等瞬时 open 失败误删完好工作区 |
+| 动机 | `view.create` 同名一律报错、绝不覆盖（早先版本的"同名 root 删除重建"已回退），所以 import 永远不会删除既有工作区；"root 存在就 open、绝不落 import" 这条规则仍然成立，且比当初更安全 |
 
 ### 4.2 `execute(api, command)` 的 list 分支
 

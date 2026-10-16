@@ -129,3 +129,34 @@ local allocate_cases = {
 for _, case in ipairs(allocate_cases) do
   H.eq(widths(case.specs, case.avail), case.want, "allocate: " .. case.name)
 end
+
+-- fractional flex bounds are floored like fixed sizes: a rect that lands between
+-- two canvas rows is never drawn, so the card used to collapse into an empty box
+local frac = ui.card({
+  layout = "column",
+  children = {
+    text_card({ id = "g1", height = ui.flex(1, { min = 5.5 }) }),
+    text_card({ id = "g2", height = ui.flex(1) }),
+  },
+})
+local fp = layout.compute(frac, geom.new(1, 1, 8, 20))
+for _, p in ipairs(fp) do
+  H.eq(p.rect.height, math.floor(p.rect.height), "rect height is whole: " .. p.path)
+  H.eq(p.rect.row, math.floor(p.rect.row), "rect row is whole: " .. p.path)
+  H.eq(p.inner.height, math.floor(p.inner.height), "inner height is whole: " .. p.path)
+end
+H.eq(fp[2].rect.height, 5, "fractional min is floored")
+H.eq(fp[3].rect.height, 3, "the floor frees the rest for the other flex child")
+H.eq(fp[2].rect.height + fp[3].rect.height, 8, "every row is still handed out")
+
+local fracrow = ui.card({
+  layout = "row",
+  children = {
+    text_card({ id = "g3", width = ui.flex(1, { max = 7.5 }) }),
+    text_card({ id = "g4", width = ui.flex(1) }),
+  },
+})
+local rw = layout.compute(fracrow, geom.new(1, 1, 6, 20))
+H.eq(rw[2].rect.width, 7, "fractional max is floored")
+H.eq(rw[3].rect.width, 13, "the remaining width is whole")
+H.eq(rw[2].rect.width + rw[3].rect.width, 20, "every column is still handed out")

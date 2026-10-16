@@ -36,8 +36,10 @@ end
 
 function App:_dims()
   local cols, lines = vim.o.columns, vim.o.lines
+  -- The command line is not usable space: a float must never cover it.
+  local rows = math.max(1, lines - vim.o.cmdheight)
   local w = math.min(axis_size(self.width, cols), cols)
-  local h = math.min(axis_size(self.height, lines), lines)
+  local h = math.min(axis_size(self.height, rows), rows)
   local row = self.opts.row
   if row == nil then
     row = math.max(0, math.floor((lines - h) / 2))
@@ -79,6 +81,9 @@ function App:_open()
   self.buf = vim.api.nvim_create_buf(false, true)
   vim.bo[self.buf].bufhidden = "wipe"
   vim.bo[self.buf].filetype = "cinderui"
+  -- A fresh buffer has nothing to diff against: without this, reopening a
+  -- closed app reuses the previous frame and renders as an empty float.
+  self.prev = {}
   self.win = vim.api.nvim_open_win(self.buf, self.opts.enter ~= false, {
     relative = "editor",
     width = w,
@@ -95,6 +100,11 @@ function App:_open()
   })
   vim.wo[self.win].winhighlight = table.concat({
     "Normal:NormalFloat",
+    -- the real cursor is parked on the (already highlighted) cursor row and a
+    -- window that is not current falls back to the global NormalNC
+    "Cursor:NormalFloat",
+    "NormalNC:NormalFloat",
+    "EndOfBuffer:NormalFloat",
     "FloatBorder:" .. theme.border,
     "FloatTitle:" .. theme.title,
     "FloatFooter:" .. theme.dim,

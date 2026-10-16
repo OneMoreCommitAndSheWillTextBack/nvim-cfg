@@ -4,7 +4,10 @@
 --     cursor = number, top = number, empty = string,
 --   }
 -- opts.item_render = fn(item, index, ctx) -> string | segments
--- The cursor row is highlighted only while the card is focused.
+-- The cursor row is highlighted in every card: the focused one with the cursor
+-- background, an unfocused one with the dimmer `cursor_inactive` variant (which
+-- the theme leaves undefined when the colorscheme has nothing to derive it from,
+-- in which case an unfocused cursor row is left unpainted).
 local M = {}
 
 local function call(v)
@@ -68,10 +71,14 @@ function M.render_with(w, canvas, rect, env, render_item)
     end
     local y = rect.row + i - 1
     local selected = env.focused and index == cursor
+    -- The cursor row carries a bar even when its card is not focused, just a
+    -- dimmer one; without an inactive background there is no bar at all.
+    local inactive = not env.focused
+    local bar = index == cursor and env.theme.cursor_variant(nil, inactive) or nil
     local transform
-    if selected then
+    if index == cursor and bar then
       transform = function(hl)
-        return env.theme.cursor_variant(hl)
+        return env.theme.cursor_variant(hl, inactive)
       end
     end
     local value
@@ -81,16 +88,16 @@ function M.render_with(w, canvas, rect, env, render_item)
       value = default_item_render(item)
     end
     local used = canvas:put_rich(y, rect.col, value, rect.width, transform) or 0
-    if selected and used < rect.width then
+    if bar and used < rect.width then
       -- pad the cursor row so the selection bar spans the whole card width
-      canvas:put_text(y, rect.col + used, string.rep(" ", rect.width - used), env.theme.cursor_variant(nil))
+      canvas:put_text(y, rect.col + used, string.rep(" ", rect.width - used), bar)
     end
   end
   local out = {}
   if total > height then
     out.scroll = { top = top, size = height, total = total }
   end
-  if env.focused and cursor >= top + 1 and cursor <= top + height then
+  if cursor >= top + 1 and cursor <= top + height then
     out.cursor_row = rect.row + (cursor - top) - 1
   end
   return out

@@ -2,6 +2,7 @@
 ---its two modes (the job gets the keys, or the plugin does) and the attach
 ---dance that binds a provider session to that window.
 local util = require("cinder_terminal.ui.util")
+local providers = require("cinder_terminal.providers")
 
 local api = vim.api
 
@@ -245,6 +246,11 @@ function M:attach_selected()
       return
     end
     if not ok or not buf then
+      if providers.is_silent(error) then
+        -- Nothing to report: the pane keeps whatever it already shows while
+        -- the provider waits out its own backoff.
+        return
+      end
       local fallback = "could not attach the terminal"
       local reason = error or fallback
       self:notify_failure(error, fallback)

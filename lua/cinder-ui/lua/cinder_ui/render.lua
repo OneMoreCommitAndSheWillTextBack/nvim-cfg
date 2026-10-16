@@ -8,15 +8,27 @@ local theme = require("cinder_ui.theme")
 local M = {}
 M.Canvas = Canvas
 
+---Title highlight of a card: `title` while it is focused, the dimmer
+---`title_inactive` otherwise (falling back to `title` when a theme has none).
+local function title_hl(th, focused)
+  if focused then
+    return th.title
+  end
+  return th.title_inactive or th.title
+end
+
 local SCROLLBAR = "▐"
 
+---Thumb of the scrollbar, drawn on the last column of the widget's own area:
+---`scroll.top`/`scroll.size` count *inner* rows, so `rect` would put the thumb on
+---a padding row and stretch it over the padding at the bottom.
 local function draw_scrollbar(canvas, p, scroll, th)
-  local r = p.rect
-  if r.height < 3 or r.width < 2 then
+  local r = p.inner
+  if r.height < 1 or r.width < 1 then
     return
   end
   local col = r.col + r.width - 1
-  local view = r.height - 2
+  local view = r.height
   local total = scroll.total or 0
   local top = scroll.top or 0
   if total <= view or view <= 0 then
@@ -29,7 +41,7 @@ local function draw_scrollbar(canvas, p, scroll, th)
     start = math.floor(top * (view - size) / max_top + 0.5)
   end
   for i = 0, size - 1 do
-    canvas:put_char(r.row + 1 + start + i, col, SCROLLBAR, th.scrollbar)
+    canvas:put_char(r.row + start + i, col, SCROLLBAR, th.scrollbar)
   end
 end
 
@@ -40,16 +52,13 @@ function M.render(placements, canvas, ctx)
   for _, p in ipairs(placements) do
     local card = p.card
     if p.path ~= "root" and card.border ~= false then
-      local hl = th.border
-      if p.id ~= nil and p.id == ctx.focused_id then
-        hl = th.border_focused
-      end
+      local focused = p.id ~= nil and p.id == ctx.focused_id
       canvas:box(p.rect, {
         style = type(card.border) == "string" and card.border or "rounded",
-        hl = hl,
+        hl = focused and th.border_focused or th.border,
         title = card.title,
         tag = card.tag,
-        title_hl = th.title,
+        title_hl = title_hl(th, focused),
         tag_hl = th.tag,
       })
     end
@@ -75,13 +84,13 @@ function M.render_frame(root, width, height, ctx)
   local th = ctx.theme or theme
   local canvas = Canvas.new(width, height)
   local rect = geom.new(1, 1, height, width)
-  local hl = (root.id ~= nil and root.id == ctx.focused_id) and th.border_focused or th.border
+  local focused = root.id ~= nil and root.id == ctx.focused_id
   canvas:box(rect, {
     style = type(root.border) == "string" and root.border or "rounded",
-    hl = hl,
+    hl = focused and th.border_focused or th.border,
     title = root.title,
     tag = root.tag,
-    title_hl = th.title,
+    title_hl = title_hl(th, focused),
     tag_hl = th.tag,
   })
   local placements = layout.compute(root, geom.inset(rect, 1))

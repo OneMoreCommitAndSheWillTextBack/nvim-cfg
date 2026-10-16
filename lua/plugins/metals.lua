@@ -21,7 +21,8 @@
 -------------------------------------------------------------------------------
 local map = vim.keymap.set
 
-vim.opt_global.completeopt = { "menuone", "noinsert", "noselect" }
+-- 全局 completeopt 已在 lua/config/options.lua 设置：插件 spec 在解析期改全局选项
+-- 依赖加载顺序，容易和 options.lua 互相覆盖。
 
 ----------------------------------
 -- PLUGINS (lazy.nvim spec) ------
@@ -91,34 +92,15 @@ return {
       metals_config.on_attach = function(client, bufnr)
         require("metals").setup_dap()
 
-        -- Buffer-local only: avoids clobbering LazyVim / your global maps in other filetypes.
+        -- 只保留 metals 特有的绑定。通用 LSP 键位交给 LazyVim
+        -- （gd/gr/gI/gy/gD/K/<leader>ca/<leader>cc/<leader>cr/<leader>cR/
+        -- <leader>cl = LSP Info/[d/]d…），在这里重复绑定只会覆盖上游语义：
+        -- gD 变 definition、gi 抢掉内置「上次插入位置」、<leader>cl 抢掉 LSP
+        -- Info、<leader>sh 抢掉帮助页、[c/]c 抢掉 diff 导航。
         local bo = { buffer = bufnr }
-
-        -- LSP mappings
-        map("n", "gD", vim.lsp.buf.definition, bo)
-        map("n", "K", vim.lsp.buf.hover, bo)
-        map("n", "gi", vim.lsp.buf.implementation, bo)
-        map("n", "gr", vim.lsp.buf.references, bo)
-        map("n", "gds", vim.lsp.buf.document_symbol, bo)
-        map("n", "gws", vim.lsp.buf.workspace_symbol, bo)
-        map("n", "<leader>cl", vim.lsp.codelens.run, bo)
-        map("n", "<leader>sh", vim.lsp.buf.signature_help, bo)
-        map("n", "<leader>rn", vim.lsp.buf.rename, bo)
-        map("n", "<leader>ca", vim.lsp.buf.code_action, bo)
 
         map("n", "<leader>ws", function()
           require("metals").hover_worksheet()
-        end, bo)
-
-        -- buffer diagnostics only
-        map("n", "<leader>d", vim.diagnostic.setloclist, bo)
-
-        map("n", "[c", function()
-          vim.diagnostic.goto_prev({ wrap = false })
-        end, bo)
-
-        map("n", "]c", function()
-          vim.diagnostic.goto_next({ wrap = false })
         end, bo)
 
         -- Example mappings for usage with nvim-dap. If you don't use that, you can
@@ -164,5 +146,12 @@ return {
         group = nvim_metals_group,
       })
     end,
+  },
+
+  -- metals 需要 scala 解析器；LazyVim 的 nvim-treesitter spec 声明了
+  -- opts_extend = { "ensure_installed" }，这里追加不会覆盖已有列表。
+  {
+    "nvim-treesitter/nvim-treesitter",
+    opts = { ensure_installed = { "scala" } },
   },
 }

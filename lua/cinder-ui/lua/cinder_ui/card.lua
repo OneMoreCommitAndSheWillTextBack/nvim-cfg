@@ -110,6 +110,31 @@ function M.validate(root)
     end
   end
 
+  local function check_padding(node, path)
+    local p = node.padding
+    if p == nil then
+      return
+    end
+    if type(p) == "number" then
+      if p < 0 then
+        err(path, "padding must be >= 0")
+      end
+      return
+    end
+    if type(p) ~= "table" then
+      err(path, "padding must be a number or { top, right, bottom, left }")
+      return
+    end
+    for _, side in ipairs({ "top", "right", "bottom", "left" }) do
+      local v = p[side]
+      if type(v) ~= "number" then
+        err(path, "padding." .. side .. " must be a number (got " .. type(v) .. ")")
+      elseif v < 0 then
+        err(path, "padding." .. side .. " must be >= 0")
+      end
+    end
+  end
+
   local function walk(node, path, is_root)
     if type(node) ~= "table" or not node.__card then
       err(path, "not a card (use ui.card{})")
@@ -176,6 +201,7 @@ function M.validate(root)
     end
 
     check_size(node, path)
+    check_padding(node, path)
 
     if node.border ~= nil and node.border ~= true and node.border ~= false and not VALID_BORDER[node.border] then
       err(path, "unknown border style '" .. tostring(node.border) .. "'")

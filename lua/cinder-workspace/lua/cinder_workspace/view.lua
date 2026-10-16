@@ -409,17 +409,15 @@ function M.create(name, folders)
   local root = vim.fs.joinpath(base, name)
   local existing, existing_err = lstat(root)
   if existing then
+    -- 已存在的对象一律不删除：des 明确不提供工作区删除与强制覆盖。
+    -- 恢复已有工作区请用 open，重建请先手动删除或换一个名称。
     if existing.type == "directory" then
-      local valid = marker_is_valid(vim.fs.joinpath(root,MARKER_NAME))
-      if not valid then
-        return fail("base目录之中存在同名非工作区文件夹，拒绝创建")
+      if marker_is_valid(vim.fs.joinpath(root, MARKER_NAME)) then
+        return fail("工作区已存在：%s（用 open 打开，或换一个名称）", root)
       end
-      local ok, rm_err = pcall(vim.fs.rm, root, { recursive = true })
-      if not ok then
-        return fail("无法删除已存在的工作区 root %s：%s", root, tostring(rm_err))
-      end else
-      return fail("base目录之中存在同名文件，无法创建工作区")
+      return fail("base目录之中存在同名非工作区文件夹，拒绝创建")
     end
+    return fail("base目录之中存在同名文件，无法创建工作区")
   end
   if not is_missing(existing_err) then
     return fail("无法检查工作区 root %s：%s", root, tostring(existing_err))

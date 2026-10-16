@@ -1,21 +1,18 @@
--- nvim v0.8.0
+-- LazyVim 自带 Snacks.lazygit（<leader>gg = 项目根、<leader>gG = cwd）以及
+-- snacks 的 lazygit UI，因此不再需要 kdheepak/lazygit.nvim + plenary。
+-- 这里只保留 <leader>lg 这个习惯用法作为别名，映射到同一个 Snacks.lazygit。
 return {
-  "kdheepak/lazygit.nvim",
-  lazy = true,
-  cmd = {
-    "LazyGit",
-    "LazyGitConfig",
-    "LazyGitCurrentFile",
-    "LazyGitFilter",
-    "LazyGitFilterCurrentFile",
-  },
-  -- optional for floating window border decoration
-  dependencies = {
-    "nvim-lua/plenary.nvim",
-  },
-  -- setting the keybinding for LazyGit with 'keys' is recommended in
-  -- order to load the plugin when the command is run for the first time
-  keys = {
-    { "<leader>lg", "<cmd>LazyGit<cr>", desc = "LazyGit" },
+  {
+    "folke/snacks.nvim",
+    optional = true,
+    keys = {
+      {
+        "<leader>lg",
+        function()
+          Snacks.lazygit({ cwd = LazyVim.root.git() })
+        end,
+        desc = "Lazygit (Root Dir)",
+      },
+    },
   },
 }

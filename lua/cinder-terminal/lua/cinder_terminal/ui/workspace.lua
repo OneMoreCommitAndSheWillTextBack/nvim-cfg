@@ -125,12 +125,19 @@ function M:apply_window_options()
   local app = state.win.app
   if valid_win(app) then
     base_window_options(app)
+    -- cinder-ui paints its floats with `Normal`/`Cursor`/`EndOfBuffer` and its
+    -- own border and title groups. The cell groups are the one thing the
+    -- workspace still overrides: the background has to follow `sidebar`, the
+    -- group the terminal documents for the left column, instead of being left
+    -- at the library's `NormalFloat`.
+    -- The border and title need no entry any more: cinder-ui draws them with
+    -- `CinderUiBorder`/`CinderUiTitle`, which `apply_card_theme` derives from
+    -- the `border`/`title` groups.
     vim.wo[app].winhighlight = table.concat({
       "Normal:" .. hl.sidebar,
+      "Cursor:" .. hl.sidebar,
       "NormalNC:" .. hl.sidebar,
       "EndOfBuffer:" .. hl.sidebar,
-      "FloatBorder:" .. hl.border,
-      "FloatTitle:" .. hl.title,
     }, ",")
   end
   local term = state.win.terminal
@@ -345,6 +352,11 @@ function M:close()
     return
   end
   state.opened = false
+  -- A provider that raised midway through a poll, or a poll that outlived the
+  -- workspace, must not leave the door bolted: every later refresh would only
+  -- queue itself behind a chain that is never going to finish.
+  state.refreshing = false
+  state.refresh_queued = false
   self:stop_timer()
   state.attach_generation = state.attach_generation + 1
   if state.attach_timer then
@@ -353,7 +365,7 @@ function M:close()
     state.attach_timer = nil
   end
   pcall(vim.cmd.stopinsert)
-  for _, win in pairs({ state.win.terminal }) do
+  for _, win in pairs({ state.win.terminal, state.win.help }) do
     if valid_win(win) then
       pcall(api.nvim_win_close, win, true)
     end

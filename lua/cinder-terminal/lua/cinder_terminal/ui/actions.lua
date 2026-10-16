@@ -1,6 +1,7 @@
 ---Everything the user asks the workspace to do: create, kill, rename,
 ---restart, switch, open/close and the `?` help popup.
 local interaction = require("cinder_terminal.interaction")
+local providers = require("cinder_terminal.providers")
 local util = require("cinder_terminal.ui.util")
 
 local api = vim.api
@@ -158,6 +159,11 @@ function M:action_create()
   end
   provider:create_terminal(container, function(ok, id, error)
     if not ok then
+      -- A dismissed prompt reports nothing and, more importantly, must not
+      -- queue a selection for a terminal that was never created.
+      if providers.is_silent(error) then
+        return
+      end
       self:notify_failure(error, "could not create the terminal")
       return
     end
@@ -227,6 +233,9 @@ function M:run_menu_entry(entry)
   local provider = entry.provider
   local function done(ok, id, error)
     if not ok then
+      if providers.is_silent(error) then
+        return
+      end
       self:notify_failure(
         error,
         entry.kind == "container" and "could not create the container" or "could not create the terminal"
@@ -455,8 +464,13 @@ function M:show_help()
   for _, line in ipairs(lines) do
     content = math.max(content, fn.strdisplaywidth(line))
   end
-  local width = math.max(46, math.min(content + 4, vim.o.columns - 4))
-  local height = #lines + 2
+  -- The popup is placed against the editor, so the screen is its hard bound the
+  -- way the layout treats it: an editor shorter than the key list gets a smaller
+  -- float - the buffer keeps every row, so the rest is a scroll away - instead
+  -- of one whose last sections sit below the screen edge.
+  local columns, rows = vim.o.columns, math.max(2, vim.o.lines - vim.o.cmdheight)
+  local width = math.max(1, math.min(math.max(46, content + 4), columns - 4))
+  local height = math.max(1, math.min(#lines + 2, rows - 2))
   local buf = scratch("cinder_terminal_help")
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -468,11 +482,10 @@ function M:show_help()
     end
   end
 
-  local columns, rows = vim.o.columns, vim.o.lines - vim.o.cmdheight
   local win = api.nvim_open_win(buf, true, {
     relative = "editor",
-    row = math.max(0, math.floor((rows - height) / 2)),
-    col = math.max(0, math.floor((columns - width) / 2)),
+    row = math.max(0, math.floor((rows - height - 2) / 2)),
+    col = math.max(0, math.floor((columns - width - 2) / 2)),
     width = width,
     height = height,
     style = "minimal",
@@ -481,6 +494,9 @@ function M:show_help()
     title_pos = "center",
     zindex = 60,
   })
+  -- The popup owns a window the workspace has to be able to close: hiding the
+  -- workspace with the help open would otherwise strand a float on screen.
+  self.state.win.help = win
   vim.wo[win].winhighlight = table.concat({
     "Normal:" .. hl.normal,
     "FloatBorder:" .. hl.border,
@@ -491,6 +507,9 @@ function M:show_help()
       pcall(api.nvim_win_close, win, true)
     end
     local state = self.state
+    if state.win.help == win then
+      state.win.help = nil
+    end
     local target = state.focus == "terminal" and state.win.terminal or state.win.app
     if self:is_open() and valid_win(target) then
       api.nvim_set_current_win(target)

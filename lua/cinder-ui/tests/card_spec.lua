@@ -162,3 +162,98 @@ H.has(
   "text widget needs get() or lines",
   "text widget without data rejected"
 )
+
+-- padding reaches geom.inset: an unvalidated value killed the render inside a
+-- vim.schedule callback instead of failing at construct time
+H.has(
+  errors_of(ui.card({
+    layout = "column",
+    children = {
+      ui.card({ id = "p1", height = 3, padding = true, body = ui.text({ lines = {} }) }),
+    },
+  })),
+  "padding must be a number or { top, right, bottom, left }",
+  "non-numeric padding rejected"
+)
+
+H.has(
+  errors_of(ui.card({
+    layout = "column",
+    children = {
+      ui.card({ id = "p2", height = 3, padding = -1, body = ui.text({ lines = {} }) }),
+    },
+  })),
+  "padding must be >= 0",
+  "negative padding rejected"
+)
+
+H.has(
+  errors_of(ui.card({
+    layout = "column",
+    children = {
+      ui.card({
+        id = "p3",
+        height = 3,
+        padding = { top = 1, right = "2", bottom = 0, left = 0 },
+        body = ui.text({ lines = {} }),
+      }),
+    },
+  })),
+  "padding.right must be a number",
+  "non-numeric padding side rejected"
+)
+
+H.has(
+  errors_of(ui.card({
+    layout = "column",
+    children = {
+      ui.card({ id = "p4", height = 3, padding = { top = 1 }, body = ui.text({ lines = {} }) }),
+    },
+  })),
+  "padding.right must be a number",
+  "incomplete padding table rejected"
+)
+
+H.has(
+  errors_of(ui.card({
+    layout = "column",
+    children = {
+      ui.card({
+        id = "p5",
+        height = 3,
+        padding = { top = 0, right = 0, bottom = -1, left = 0 },
+        body = ui.text({ lines = {} }),
+      }),
+    },
+  })),
+  "padding.bottom must be >= 0",
+  "negative padding side rejected"
+)
+
+H.eq(
+  ui.validate(ui.card({
+    layout = "column",
+    children = {
+      ui.card({ id = "ok1", height = 3, padding = 2, body = ui.text({ lines = {} }) }),
+    },
+  })),
+  nil,
+  "numeric padding accepted"
+)
+
+H.eq(
+  ui.validate(ui.card({
+    padding = { top = 0, right = 1, bottom = 1, left = 1 },
+    layout = "column",
+    children = {
+      ui.card({
+        id = "ok2",
+        height = 3,
+        padding = { top = 1, right = 0, bottom = 1, left = 0 },
+        body = ui.text({ lines = {} }),
+      }),
+    },
+  })),
+  nil,
+  "padding table accepted on the root and on a child"
+)

@@ -5,6 +5,7 @@
 ---panel. Providers supply the data: `local` owns Neovim pty sessions, `tmux`
 ---owns tmux sessions and windows driven by a single embedded client.
 local highlights = require("cinder_terminal.highlights")
+local providers = require("cinder_terminal.providers")
 local LocalProvider = require("cinder_terminal.providers.local")
 local TmuxProvider = require("cinder_terminal.providers.tmux")
 local UI = require("cinder_terminal.ui")
@@ -115,10 +116,14 @@ end
 ---and `copy_current()` differ only in what they ask the provider to do.
 ---@param workspace CinderTerminal.UI
 ---@param failure string What to report when the provider sends no message.
----@return fun(ok: boolean, id?: string, error?: string)
+---@return fun(ok: boolean, id?: string, error?: CinderTerminal.Silent|string)
 local function after_create(workspace, failure)
   return function(ok, id, error)
     if not ok then
+      -- A dismissed prompt changes nothing and must not queue a selection.
+      if providers.is_silent(error) then
+        return
+      end
       workspace:notify_failure(error, failure)
       return
     end
@@ -251,17 +256,25 @@ end
 
 function M.open(cwd)
   local workspace = ui()
+  local failure
   if type(cwd) == "string" and cwd ~= "" and cwd ~= "bottom" and cwd ~= "right" then
     -- Start the requested shell before the workspace does its first snapshot:
     -- the container is not empty, so the provider's prepare leaves it alone
-    -- and `:CinderTerminalNew <dir>` starts one shell, not two.
+    -- and `:CinderTerminalNew <dir>` starts one shell, not two. A directory
+    -- that is gone or is a file leaves the session as a failed row, and the
+    -- workspace still opens - the failure is reported once there is a row to
+    -- report it in.
     local local_provider = provider("local")
     local session = local_provider and local_provider:create(cwd) or nil
     if session then
       workspace.state.pending_item = "local:" .. session.id
+      failure = local_provider:start_error(session)
     end
   end
   workspace:open()
+  if failure then
+    workspace:notify_failure(failure, "could not start the shell")
+  end
   return M
 end
 
@@ -315,11 +328,17 @@ end
 
 function M.copy_current()
   local workspace = ui()
+  local node = workspace:selected_item()
+  -- Same guard as `restart_current`: the local provider can only copy its own
+  -- terminals, and handing it a tmux node used to open an unrelated shell in
+  -- the project root while the selected window stayed untouched.
+  if not node or node.provider ~= "local" then
+    return M
+  end
   local local_provider = provider("local")
   if not local_provider then
     return M
   end
-  local node = workspace:selected_item()
   local_provider:duplicate(node, after_create(workspace, "could not copy the terminal"))
   return M
 end

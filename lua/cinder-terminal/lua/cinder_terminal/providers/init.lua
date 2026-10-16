@@ -41,16 +41,37 @@
 ---providers use it to have something to show (the local shell) instead of
 ---making the user create the first terminal. Must be cheap and idempotent.
 ---@field snapshot fun(self: CinderTerminal.Provider, cb: fun(ok: boolean, containers: CinderTerminal.Node[], error?: string))
----@field show fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, buf?: number, error?: string), opts?: { force?: boolean })
+---@field show fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, buf?: number, error?: CinderTerminal.Silent|string), opts?: { force?: boolean })
 ---@field buffer? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node): number?
----@field create_container? fun(self: CinderTerminal.Provider, cb: fun(ok: boolean, id?: string, error?: string))
----@field create_terminal? fun(self: CinderTerminal.Provider, container: CinderTerminal.Node, cb: fun(ok: boolean, id?: string, error?: string))
----@field kill? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, error?: string))
----@field rename? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, label: string, cb: fun(ok: boolean, error?: string))
----@field restart? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, error?: string))
+---@field create_container? fun(self: CinderTerminal.Provider, cb: fun(ok: boolean, id?: string, error?: CinderTerminal.Silent|string))
+---@field create_terminal? fun(self: CinderTerminal.Provider, container: CinderTerminal.Node, cb: fun(ok: boolean, id?: string, error?: CinderTerminal.Silent|string))
+---@field kill? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, error?: CinderTerminal.Silent|string))
+---@field rename? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, label: string, cb: fun(ok: boolean, error?: CinderTerminal.Silent|string))
+---@field restart? fun(self: CinderTerminal.Provider, node: CinderTerminal.Node, cb: fun(ok: boolean, error?: CinderTerminal.Silent|string))
 ---@field close? fun(self: CinderTerminal.Provider)
 
+---@class CinderTerminal.Silent
+
 local M = {}
+
+---Outcome that must not be reported to the user. A provider passes it as the
+---`error` value of a failed callback in the two cases where the user already
+---knows what happened: a prompt was dismissed, and a failure the provider is
+---retrying in the background on its own. A `nil` error keeps its old meaning -
+---failed without a message - and stays loud, because the caller names the
+---action it asked for.
+---@type CinderTerminal.Silent
+M.SILENT = setmetatable({}, {
+  __tostring = function()
+    return "silent"
+  end,
+})
+
+---@param error? any
+---@return boolean
+function M.is_silent(error)
+  return error == M.SILENT
+end
 
 ---@param caps? table
 ---@return CinderTerminal.Provider.Capabilities
@@ -98,12 +119,12 @@ function M.actions(node, capabilities)
   return actions
 end
 
----Neovim is inconsistent about the third argument of `on_exit`: `jobstart`
----hands over the string `"exit"`, while a job with a pty (and `termopen`) can
----hand over the collected output lines instead. Both shapes have to be
----tolerated: `table.concat` on the string raised an error inside the callback,
----which left Neovim sitting on a `Press ENTER` prompt with the workspace stuck
----on stale data.
+---Neovim is inconsistent about the third argument of `on_exit`: a plain job
+---hands over the string `"exit"`, while a terminal job (`term = true`) can hand
+---over the collected output lines instead. Both shapes have to be tolerated:
+---`table.concat` on the string raised an error inside the callback, which left
+---Neovim sitting on a `Press ENTER` prompt with the workspace stuck on stale
+---data.
 ---@param event any
 ---@param limit? number Maximum length of the returned text.
 ---@return string?

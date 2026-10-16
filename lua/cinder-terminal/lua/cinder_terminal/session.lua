@@ -9,7 +9,7 @@ local fn = vim.fn
 ---@class CinderTerminal.SessionOptions
 ---@field cwd? string|fun():string Project directory used for new sessions.
 ---@field root_markers? string[]|false Markers passed to `vim.fs.root`.
----@field shell? string|string[] Shell command used by `termopen`.
+---@field shell? string|string[] Shell command used by the terminal job.
 ---@field on_change? fun() Called after session state changes.
 ---@field on_buffer? fun(buf: number) Called after a terminal buffer is created.
 
@@ -19,6 +19,23 @@ local fn = vim.fn
 ---@field buf number
 ---@field status string
 ---@field job? number
+---@field error? string Why the shell never started, when the spawn failed.
+
+---One line explaining a spawn that did not produce a job. `jobstart` raises
+---(`E475: Invalid argument: expected valid directory`) instead of returning a
+---negative job id when `cwd` is gone or is not a directory, so the only
+---information about that failure is what `pcall` caught.
+---@param ok boolean
+---@param result any Job id, or the error `pcall` caught.
+---@return string? reason
+local function spawn_error(ok, result)
+  if not ok then
+    return (tostring(result):gsub("^Vim:", ""))
+  end
+  if type(result) ~= "number" or result <= 0 then
+    return "could not start the shell"
+  end
+end
 
 ---@param opts? CinderTerminal.SessionOptions
 ---@return CinderTerminal.SessionManager
@@ -127,6 +144,15 @@ function M:is_running(session)
   return session ~= nil and session.buf ~= nil and api.nvim_buf_is_valid(session.buf) and session.status == "running"
 end
 
+---True when the shell never started at all, as opposed to a session that ran
+---and ended: a finished session still owns the scrollback the pane shows, a
+---failed one has nothing to attach to.
+---@param session? CinderTerminal.Session
+---@return boolean
+function M:is_failed(session)
+  return session ~= nil and session.status == "failed"
+end
+
 ---@param buf? number
 ---@return CinderTerminal.Session?
 function M:find_by_buf(buf)
@@ -194,7 +220,14 @@ function M:current()
       return session
     end
   end
-  return list[1]
+  -- Nothing is running: a session that ran and ended still owns the scrollback
+  -- the pane can show, so it is the better fallback. A session that never
+  -- started owns nothing and is never handed out as the current one.
+  for _, session in ipairs(list) do
+    if not self:is_failed(session) then
+      return session
+    end
+  end
 end
 
 ---@param callback? fun()
@@ -235,7 +268,14 @@ function M:create(cwd)
   end
 
   api.nvim_buf_call(buf, function()
-    session.job = fn.termopen(self:command(), {
+    -- `jobstart` with `term = true` is what `termopen` now is (deprecated in
+    -- 0.12): same buffer-local attachment, same options, same `on_exit`
+    -- signature. Both raise on a bad spawn instead of returning a negative job
+    -- id, so the one unguarded step of this function is the call itself: the
+    -- session has to survive as a failed row, never as an uncaught error and
+    -- never as a session that looks alive with no process behind it.
+    local ok, result = pcall(fn.jobstart, self:command(), {
+      term = true,
       cwd = cwd,
       on_exit = function(_, code)
         local status = tonumber(code) or 0
@@ -243,11 +283,13 @@ function M:create(cwd)
         self:_changed()
       end,
     })
+    session.error = spawn_error(ok, result)
+    if session.error then
+      session.status = "failed"
+    else
+      session.job = result
+    end
   end)
-
-  if not session.job or session.job <= 0 then
-    session.status = "failed"
-  end
 
   self:_changed()
   return session

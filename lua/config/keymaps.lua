@@ -9,7 +9,8 @@ map("n", "<C-z>", "<C-r>", { desc = "Redo" })
 map("x", "<C-z>", "<Esc><C-r>", { desc = "Redo" })
 map("i", "<C-z>", "<C-g>u<C-o><C-r>", { desc = "Redo" })
 
-pcall(vim.keymap.del, "n", "<leader>l")
+-- LazyVim 把 <leader>l 绑到 :Lazy，这里只补一个 <leader>ll 别名。
+-- 不再删除上游映射：删除只是把 pcall 的错误吞掉，换不来任何好处。
 map("n", "<leader>ll", "<cmd>Lazy<cr>", { desc = "Lazy" })
 
 local function terminal()
@@ -44,9 +45,8 @@ map("n", "<leader>ta", function()
   terminal().add()
 end, { desc = "Add Terminal Session" })
 
-map("n", "<BS>", function()
-  terminal().add()
-end, { desc = "Add Terminal Session" })
+-- 不再全局占用 <BS>：它会吞掉 normal 模式左移，并在 picker/dashboard 里
+-- 变成「误开新终端」。加终端统一用 <leader>ta。
 
 map("n", "<Leader>tc", function()
   terminal().copy_current()
@@ -68,6 +68,9 @@ map("n", "<leader>tn", function()
   terminal().next()
 end, { desc = "Next Terminal" })
 
+-- <C-S-Right>/<C-S-Left> 需要终端把修饰键传成 CSI-u（kitty 键盘协议）。
+-- ghostty/tmux 场景下还要在 ~/.tmux.conf 写 `set -g extended-keys on`，
+-- 否则 shift+方向键到不了 Neovim（键位本身仍可用 <leader>tn / <leader>tp）。
 map({ "t", "n" }, "<C-S-Right>", function()
   terminal().next()
 end, { desc = "Next Terminal" })

@@ -18,7 +18,8 @@ Lua 模块名是 `cinder_ui`（目录 `lua/cinder_ui/`）。
 - **构造期校验**：`ui.validate(root)` 返回 `nil`（合法）或
   `{ "root.children[1]: height required in column layout", ... }`。
   能查的都在这里查：容器/内容混用、缺尺寸、重复 id、复用的卡片对象、
-  `flex.min > max`、带边框但 `height < 2`、无 id 却 `focusable`、未知 widget 等。
+  `flex.min > max`、带边框但 `height < 2`、无 id 却 `focusable`、
+  `padding` 不是「`>= 0` 的数」或「四个边都是数的表」、未知 widget 等。
   布局期算不下（空间不足）属于「降级」而不是错误，只在 `layout.compute`
   的第二个返回值里给 warning。
 - **widget 无状态**：每次渲染通过 `get()` 闭包重新取数据；插件改完自己的状态
@@ -56,7 +57,7 @@ app:set_footer("  j/k move  q quit  ")
 
 | 名称 | 说明 |
 | --- | --- |
-| `ui.setup({ hl = {...} })` | 定义/覆盖 `CinderUiBorder(-Focus)`、`CinderUiTitle`、`CinderUiTag`、`CinderUiCursor`、`CinderUiDim`、`CinderUiScrollbar`；默认值从 `FloatBorder` / `CursorLine` / `NormalFloat` 推导 |
+| `ui.setup({ hl = {...} })` | 定义/覆盖 `CinderUiBorder(-Focus)`、`CinderUiTitle(-Inactive)`、`CinderUiTag`、`CinderUiCursor(-Inactive)`、`CinderUiDim`、`CinderUiScrollbar`；默认值从 `FloatBorder` / `FloatTitle` / `CursorLine` / `Function` / `NormalFloat` / `Comment` 推导。全部用 `default = true` 落盘，所以先自己 `nvim_set_hl` 再 `setup()` 的组不会被覆盖 |
 | `ui.card{...}` | 建卡。字段：`id` `title` `tag` `height` `width` `border` `padding` `layout` `children` `body` `focusable` |
 | `ui.flex(w, {min, max})` | 弹性尺寸标记 |
 | `ui.text{ get | lines }` | 文本 widget，行可以是字符串或 `{ {text, hl}, ... }` 段 |
@@ -71,7 +72,9 @@ app:set_footer("  j/k move  q quit  ")
 | `app:placement(id)` / `app:find(id)` / `app:card_at(row, col)` | 查布局（`placement` 带 `rect` / `inner`） |
 | `app:set_footer(text)` / `app:close()` | 浮窗 footer / 关闭 |
 | `ui.ensure_visible(cursor, top, height, total)` | 滚动跟随小工具（写你自己的 j/k 时用） |
-| `ui.variant(base_hl, { bg = ... })` | 生成并缓存派生高亮组（选中行就是 `base + cursor bg`） |
+| `ui.variant(base_hl, { bg = ... })` | 生成并缓存派生高亮组（选中行就是 `base + cursor bg`）；组名单调递增、永不重用，不同 base/override 不会撞名 |
+| `ui.theme.title_inactive` / `ui.theme.cursor_inactive` | 未聚焦卡片的标题组 / 光标行组（组名字符串）。`title_inactive` 默认取 `Comment` 的 fg（不加粗）；`cursor_inactive` 只在配色**确实**给了光标底色时，才由该底色向浮窗底色淡化 55% 推导，否则该组保持未定义 ⇒ 未聚焦的光标行不画选中条 |
+| `ui.theme.cursor_variant(base_hl, inactive)` | 光标行的派生组：`inactive == true` 用 `cursor_inactive` 的底色；该底色未定义时原样返回 `base_hl`（即不画条） |
 | `ui.render_string(root, { width, height, focused_id })` | 离屏渲染成 ASCII（golden 测试/demo 调试用） |
 
 ## 渲染实现要点
@@ -80,14 +83,19 @@ app:set_footer("  j/k move  q quit  ")
   （`╭─[2]─Files────╮`）、CJK 宽度、span 都在画布层完成。
 - 着色用 `virt_text` + `virt_text_win_col` 覆盖在真实文本上；光标行不是 `cursorline`，
   而是给该行每段文本拼上「原高亮 + 光标底色」的派生组，所以选中条只覆盖卡片内部宽度。
+  聚焦的卡用 `CinderUiCursor` 的底色，未聚焦的卡用 `cursor_inactive` 的暗色底（该组没
+  定义就整行不画条），只有确实画了条才把该行铺满卡片宽度。
 - 落盘时**文本按行 diff**、**span 整帧重建**。原因：`nvim_buf_set_lines` 会把被替换行
   里的 extmark 挪到后一行，按行 diff span 会残留重叠（这个 bug 有专门的回归测试）。
+- 超出可用宽度的文字按**显示列**截断并补一个 `…`（宽字符不会被切开）；标题、tag 同样
+  按显示列截断，绝不越出边框；`App` 的高度上限是 `lines - cmdheight`，不盖住命令行。
 - 空间不足时从最大的 flex 开始压缩；实在塞不下就 clip 并给 warning，绝不画到框外。
+  flex 的 `min` / `max` 与固定尺寸一样向下取整，避免出现落在两行之间的矩形。
 
 ## 测试与 demo
 
 ```sh
-# 88 项单测（geom / canvas / validate / layout / golden / headless App 集成）
+# 193 项单测（geom / canvas / validate / layout / golden / inactive 变体 / headless App 集成）
 # 在插件根目录（本目录）下执行
 nvim --headless -u NONE -i NONE -l tests/run.lua
 

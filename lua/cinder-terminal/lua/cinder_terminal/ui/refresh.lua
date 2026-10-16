@@ -3,6 +3,17 @@
 ---@class CinderTerminal.UI
 local M = {}
 
+---A provider reports failure through its callback, but it can also raise before
+---it ever gets there: `vim.system` throws when tmux cannot be spawned at all,
+---and `vim.fs.root`/`jobstart` do the same for a bad path. One provider falling
+---over must not wedge the poll, so the throw becomes the same failed result the
+---provider would have sent and the chain moves on.
+---@param err any
+---@return string
+local function error_text(err)
+  return type(err) == "string" and err or vim.inspect(err)
+end
+
 function M:refresh()
   local state = self.state
   if not self:is_open() then
@@ -34,10 +45,21 @@ function M:refresh()
       return
     end
     index = index + 1
-    provider:snapshot(function(ok, containers, error)
+    -- `settled` keeps a provider that both reports and then throws from
+    -- advancing the chain twice.
+    local settled = false
+    local function done(ok, containers, error)
+      if settled then
+        return
+      end
+      settled = true
       results[provider.name] = { ok = ok, containers = containers or {}, error = error }
       step()
-    end)
+    end
+    local ok, err = pcall(provider.snapshot, provider, done)
+    if not ok then
+      done(false, {}, error_text(err))
+    end
   end
   step()
 end

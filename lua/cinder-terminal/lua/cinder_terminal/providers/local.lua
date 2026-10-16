@@ -67,6 +67,18 @@ function M:node_id(session)
   return "local:" .. session.id
 end
 
+---Reason a freshly created session cannot be typed into, if any. A shell that
+---never started stays in the list as a failed row, so nothing may call it a
+---success just because `create()` returned.
+---@param session? CinderTerminal.Session
+---@return string? reason
+function M:start_error(session)
+  if not session or self.pty:is_running(session) then
+    return nil
+  end
+  return session.error or "could not start shell"
+end
+
 ---Buffer that `destroy` will delete for this node, if it belongs to a session.
 ---@param node CinderTerminal.Node
 ---@return number?
@@ -119,27 +131,44 @@ function M:snapshot(cb)
   cb(true, { container })
 end
 
+---A session the pane can show: its buffer exists and it is not a shell that
+---never started.
+---@param session? CinderTerminal.Session
+---@return CinderTerminal.Session?
+function M:attachable(session)
+  if session and api.nvim_buf_is_valid(session.buf) and not self.pty:is_failed(session) then
+    return session
+  end
+end
+
 ---@param node CinderTerminal.Node
 ---@param cb fun(ok: boolean, buf?: number, error?: string)
 function M:show(node, cb)
   if node.kind == "container" then
-    local current = self.pty:current()
-    if current and api.nvim_buf_is_valid(current.buf) then
-      cb(true, current.buf)
+    -- A container whose shells all failed explains itself instead of putting
+    -- one of their empty buffers in the pane.
+    local list = self.pty:list()
+    local session = self:attachable(self.pty:current())
+    for _, candidate in ipairs(list) do
+      session = session or self:attachable(candidate)
+    end
+    if session then
+      cb(true, session.buf)
       return
     end
-    local first = self.pty:list()[1]
-    if first and api.nvim_buf_is_valid(first.buf) then
-      cb(true, first.buf)
-      return
-    end
-    cb(false, nil, "no local terminal yet")
+    cb(false, nil, list[1] and list[1].error or "no local terminal yet")
     return
   end
 
   local session = self:find(node.id)
   if not session or not api.nvim_buf_is_valid(session.buf) then
     cb(false, nil, "terminal no longer exists")
+    return
+  end
+  if self.pty:is_failed(session) then
+    -- Nothing was ever attached to that buffer: showing it would only put an
+    -- empty pane on screen where the reason belongs.
+    cb(false, nil, session.error or "the shell did not start")
     return
   end
   self.pty:set_current(session)
@@ -155,7 +184,9 @@ function M:create_terminal(container, cb)
     completion = "dir",
   }, function(value)
     if not value or value == "" then
-      cb(false, nil, nil)
+      -- Dismissing the prompt is not a failure: the caller stays silent about
+      -- `SILENT` instead of painting a red banner for a decision the user made.
+      cb(false, nil, providers.SILENT)
       return
     end
     local cwd = self.pty:normalize_dir(value)
@@ -164,7 +195,12 @@ function M:create_terminal(container, cb)
       return
     end
     local session = self:create(cwd)
-    cb(session ~= nil, session and self:node_id(session) or nil, session and nil or "could not start shell")
+    local failure = session and self:start_error(session) or "could not start shell"
+    if failure then
+      cb(false, nil, failure)
+      return
+    end
+    cb(true, self:node_id(session), nil)
   end)
 end
 
@@ -201,11 +237,17 @@ function M:restart(node, cb)
   end
   local cwd = session.cwd
   local fresh = self:create(cwd)
-  self:destroy(session)
-  if not fresh then
-    cb(false, "could not restart shell")
+  local failure = fresh and self:start_error(fresh)
+  if failure then
+    -- A restart that could not spawn leaves the session the user was looking
+    -- at alone instead of trading a working shell for a failed row.
+    if fresh then
+      self:destroy(fresh)
+    end
+    cb(false, failure)
     return
   end
+  self:destroy(session)
   cb(true)
 end
 
@@ -219,7 +261,12 @@ function M:duplicate(node, cb)
   end
   cwd = cwd or self.pty:root()
   local session = self:create(cwd)
-  cb(session ~= nil, session and self:node_id(session) or nil, session and nil or "could not start shell")
+  local failure = session and self:start_error(session) or "could not start shell"
+  if failure then
+    cb(false, nil, failure)
+    return
+  end
+  cb(true, self:node_id(session), nil)
 end
 
 ---Release every local session. Called when the plugin is torn down, not when

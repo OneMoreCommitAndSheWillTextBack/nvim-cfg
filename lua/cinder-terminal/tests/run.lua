@@ -1263,6 +1263,590 @@ run_case("the workspace keeps its hint card inside the frame", function()
   local_provider:close()
 end)
 
+-- Regression tests: failed spawns, silent outcomes, clamping -------------
+
+---@param providers_list CinderTerminal.Provider[]
+---@return table workspace
+local function stub_workspace(providers_list)
+  local highlights = require("cinder_terminal.highlights")
+  local UI = require("cinder_terminal.ui")
+
+  highlights.setup()
+  local workspace = UI.new({
+    width = 0.9,
+    height = 0.86,
+    left_ratio = 0.3,
+    border = "rounded",
+    refresh_interval = 0,
+    confirm = false,
+    keymaps = {},
+    groups = highlights.groups,
+  })
+  workspace:set_providers(providers_list)
+  return workspace
+end
+
+---Extmarks of one canvas row, in buffer order.
+---@param workspace table
+---@param row number 0-based buffer row
+---@return { text: string, hl: string? }[]
+local function row_spans(workspace, row)
+  local spans = {}
+  for _, mark in
+    ipairs(api.nvim_buf_get_extmarks(workspace.state.buf.app, workspace.state.app.ns, { row, 0 }, { row, -1 }, {
+      details = true,
+    }))
+  do
+    for _, span in ipairs(mark[4].virt_text or {}) do
+      spans[#spans + 1] = { text = span[1], hl = span[2] }
+    end
+  end
+  return spans
+end
+
+---@param workspace table
+---@param id string
+---@param index number 1-based content row of the card
+---@return number 0-based buffer row
+local function content_row(workspace, id, index)
+  local placement = workspace.state.app:placement(id)
+  return placement.inner.row + index - 2
+end
+
+---Background of a highlight group, resolved through links.
+---@param name? string
+---@return string
+local function group_bg(name)
+  if not name then
+    return "none"
+  end
+  local hl = api.nvim_get_hl(0, { name = name, link = false })
+  return hl.bg and ("#%06x"):format(hl.bg) or "none"
+end
+
+---Every distinct background cinder-ui derived for the cursor row of a card.
+---@param workspace table
+---@param id string
+---@param index number
+---@return string[]
+local function cursor_bar_bgs(workspace, id, index)
+  local seen, out = {}, {}
+  for _, span in ipairs(row_spans(workspace, content_row(workspace, id, index))) do
+    if span.hl and span.hl:match("^CinderUiVar") then
+      local bg = group_bg(span.hl)
+      if not seen[bg] then
+        seen[bg] = true
+        out[#out + 1] = bg
+      end
+    end
+  end
+  return out
+end
+
+run_case("a shell that cannot start leaves a failed session instead of an error", function()
+  local manager = session.new({ cwd = vim.fn.getcwd(), shell = { vim.o.shell } })
+
+  -- A cwd that is gone (the same shape as a file where a directory is
+  -- expected) makes the spawn raise; the session manager has to catch that.
+  local ok, created = pcall(function()
+    return manager:create("/nonexistent-cinder-terminal-dir")
+  end)
+  truthy(ok, "creating a session in a missing directory does not raise")
+  truthy(created ~= nil, "the session is still reported")
+  eq(created.status, "failed", "it is marked failed")
+  eq(created.job, nil, "with no job behind it")
+  eq(manager:is_running(created), false, "so nothing lists it as running")
+  eq(manager:is_failed(created), true, "and it is known as failed")
+  truthy((created.error or ""):find("E475", 1, true) ~= nil, "with the reason the spawn gave")
+  eq(#manager:list(), 1, "the failed row is what the sidebar shows")
+
+  pcall(api.nvim_buf_delete, created.buf, { force = true })
+end)
+
+run_case("a failed shell is a reported failure and is never attached", function()
+  local LocalProvider = require("cinder_terminal.providers.local")
+  local provider = LocalProvider.new({ cwd = vim.fn.getcwd(), shell = { vim.o.shell }, auto_shell = false })
+  local created = provider:create("/nonexistent-cinder-terminal-dir")
+
+  truthy(created ~= nil, "the provider reports the session it could not start")
+  truthy(provider:start_error(created) ~= nil, "and calls it a failure")
+  eq(provider.pty:current(), nil, "the failed shell does not become the current one")
+
+  local attached
+  provider:show({ id = provider:node_id(created), kind = "terminal", provider = "local" }, function(ok, _, error)
+    attached = { ok = ok, error = error }
+  end)
+  eq(attached.ok, false, "selecting it does not put an empty buffer in the pane")
+  truthy((tostring(attached.error)):find("E475", 1, true) ~= nil, "the refusal repeats the reason")
+
+  provider:close()
+end)
+
+run_case("a refresh survives a provider that throws", function()
+  local calls = 0
+  local failing = {
+    name = "failing",
+    capabilities = providers.capabilities({}),
+    snapshot = function()
+      calls = calls + 1
+      error("no tmux binary at all")
+    end,
+  }
+  local workspace = stub_workspace({ failing, stub_provider({ stub_container("stub:1", "one") }) })
+  workspace:open()
+
+  eq(workspace.state.refreshing, false, "the poll finishes instead of staying in flight")
+  eq(#workspace.state.containers, 1, "the provider after the failing one still reported")
+  truthy(
+    (workspace.state.message or ""):find("no tmux binary", 1, true) ~= nil,
+    "and the failure is named in the hint row"
+  )
+
+  workspace:refresh()
+  eq(calls, 2, "the next poll reaches the failing provider again instead of queueing forever")
+  eq(workspace.state.refresh_queued, false, "nothing is left queued behind it")
+  workspace:close()
+  eq(workspace.state.refreshing, false, "closing the workspace releases the poll")
+end)
+
+run_case("a provider that never answers does not wedge the sidebar", function()
+  local stuck = { name = "stuck", capabilities = providers.capabilities({}), snapshot = function() end }
+  local workspace = stub_workspace({ stuck })
+  workspace:open()
+
+  eq(workspace.state.refreshing, true, "the poll is still waiting for an answer")
+  workspace:refresh()
+  eq(workspace.state.refresh_queued, true, "so a second poll can only queue")
+  workspace:close()
+  eq(workspace.state.refreshing, false, "hiding the workspace clears the in-flight flag")
+  eq(workspace.state.refresh_queued, false, "and drops the queued poll")
+end)
+
+run_case("a dismissed prompt is not an error", function()
+  local workspace, local_provider = make_workspace()
+  local reported
+  vim.ui.input = function(_, on_confirm)
+    on_confirm(nil)
+  end
+
+  workspace:set_focus("items")
+  workspace:action_create()
+  eq(workspace.state.message, nil, "dismissing the prompt raises no banner")
+  eq(#workspace.state.items, 0, "creates no terminal")
+  eq(workspace.state.pending_item, nil, "and queues no selection")
+
+  local_provider:create_terminal({ id = "local", kind = "container", provider = "local" }, function(ok, _, error)
+    reported = { ok = ok, error = error }
+  end)
+  eq(reported.ok, false, "the provider still reports that nothing was created")
+  eq(providers.is_silent(reported.error), true, "with the silent outcome the UI leaves alone")
+
+  -- A real failure keeps its banner.
+  local failing = stub_provider({ stub_container("stub:1", "one") })
+  failing.capabilities.create_terminal = true
+  failing.create_terminal = function(_, _, cb)
+    cb(false, nil, "the disk is on fire")
+  end
+  workspace:set_providers({ failing })
+  workspace:refresh()
+  workspace:set_focus("items")
+  workspace:action_create()
+  eq(workspace.state.message, "the disk is on fire", "a failure that has a reason keeps it")
+
+  workspace:close()
+  local_provider:close()
+end)
+
+run_case("a suppressed attach keeps the pane and stays silent", function()
+  local workspace, local_provider = make_workspace()
+  local created = local_provider:create(vim.fn.getcwd())
+  workspace:refresh()
+  workspace:select_item("local:" .. created.id)
+  workspace:set_focus("terminal")
+  truthy(
+    wait_for(1000, function()
+      return api.nvim_win_get_buf(workspace.state.win.terminal) == created.buf
+    end),
+    "the pane shows the session"
+  )
+
+  -- What the tmux provider does while it backs off: report nothing at all.
+  local_provider.show = function(_, _, cb)
+    cb(false, nil, providers.SILENT)
+  end
+  workspace.state.attach_force = true
+  workspace:invalidate_terminal()
+  truthy(
+    wait_for(1000, function()
+      return workspace.state.attach_generation > 1
+    end),
+    "the pane tried to attach again"
+  )
+
+  eq(workspace.state.message, nil, "a suppressed attempt raises no banner")
+  eq(api.nvim_win_get_buf(workspace.state.win.terminal), created.buf, "and leaves the last output on screen")
+  eq(vim.bo[api.nvim_win_get_buf(workspace.state.win.terminal)].buftype, "terminal", "not a placeholder")
+
+  workspace:close()
+  local_provider:close()
+end)
+
+run_case("the sidebar keeps a cursor row while the pane has the keyboard", function()
+  local workspace = stub_workspace({
+    stub_provider({
+      (function()
+        local container = stub_container("stub:1", "one")
+        container.children = {
+          { id = "stub:c1", kind = "terminal", provider = "stub", parent = "stub:1", label = "one" },
+          { id = "stub:c2", kind = "terminal", provider = "stub", parent = "stub:1", label = "two" },
+        }
+        return container
+      end)(),
+    }),
+  })
+  workspace:open()
+  workspace:refresh()
+  workspace:set_focus("items")
+  workspace:select_item("stub:c1")
+
+  local focused = cursor_bar_bgs(workspace, "items", 1)
+  eq(#focused, 1, "the focused row wears exactly one selection colour")
+  eq(focused[1], group_bg(workspace:highlights().selected), "which is the `selected` group")
+
+  workspace:set_focus("terminal")
+  local inactive = cursor_bar_bgs(workspace, "items", 1)
+  eq(#inactive, 1, "the unfocused row still wears a bar")
+  eq(inactive[1], group_bg(workspace:highlights().selected_inactive), "painted with `selected_inactive`")
+  truthy(inactive[1] ~= focused[1], "which is not the focused colour")
+
+  -- cinder-ui reads those groups from the terminal's own names.
+  local theme = require("cinder_ui.theme")
+  eq(theme.cursor_inactive ~= nil, true, "cinder-ui has a group for an unfocused cursor row")
+  eq(
+    group_bg(theme.cursor_inactive),
+    group_bg(workspace:highlights().selected_inactive),
+    "and consumes `selected_inactive` for it"
+  )
+  eq(theme.title_inactive ~= nil, true, "plus a title group for unfocused cards")
+
+  workspace:close()
+end)
+
+run_case("the help popup fits a short screen and leaves with the workspace", function()
+  local workspace, local_provider = make_workspace()
+  local columns, lines = vim.o.columns, vim.o.lines
+  vim.o.columns, vim.o.lines = 60, 14
+  workspace:reflow()
+
+  workspace:show_help()
+  local win = workspace.state.win.help
+  truthy(win ~= nil and api.nvim_win_is_valid(win), "the popup opened")
+  local config = api.nvim_win_get_config(win)
+  truthy(config.row >= 0 and config.col >= 0, "it is placed inside the editor")
+  truthy(config.row + config.height + 2 <= vim.o.lines, "with room for its own border")
+  truthy(config.col + config.width + 2 <= vim.o.columns, "and for the sides of it")
+
+  local help_buf = api.nvim_win_get_buf(win)
+  truthy(
+    #api.nvim_buf_get_lines(help_buf, 0, -1, false) > config.height,
+    "a clamped popup keeps every section in the buffer, a scroll away"
+  )
+
+  workspace:close()
+  eq(api.nvim_win_is_valid(win), false, "hiding the workspace closes the popup")
+  vim.o.columns, vim.o.lines = columns, lines
+  local_provider:close()
+end)
+
+run_case("the hint row spells keys, descriptions and separators apart", function()
+  local workspace, local_provider = make_workspace()
+  workspace:set_focus("items")
+
+  local hl = workspace:highlights()
+  local segments = workspace:hint_line()
+  truthy(#segments >= 5, "the row is several segments, not one flat line")
+  eq(segments[1].text, " ", "the row keeps one cell of padding")
+  eq(segments[2].hl, hl.title, "the key wears the title group")
+  eq(segments[3].hl, hl.help, "its description the help group")
+  eq(segments[4].text, " │ ", "entries are separated by a rule")
+  eq(segments[4].hl, hl.detail, "painted dimmer than both")
+
+  local entries = workspace:context_keys()
+  local function last_desc()
+    return segments[#segments].text
+  end
+  local complete = false
+  for _, entry in ipairs(entries) do
+    complete = complete or entry.desc == last_desc()
+  end
+  truthy(complete, "the row ends on a whole entry")
+
+  -- A narrow frame drops trailing entries whole instead of cutting a word.
+  vim.o.columns = 50
+  workspace:reflow()
+  local narrow = workspace:hint_line()
+  truthy(#narrow < #segments, "the narrower row lists fewer parts")
+  local last = narrow[#narrow].text
+  local whole = false
+  for _, entry in ipairs(entries) do
+    whole = whole or entry.desc == last
+  end
+  truthy(whole, "and still stops on a whole description")
+  local used = 0
+  for _, segment in ipairs(narrow) do
+    used = used + vim.fn.strdisplaywidth(segment.text)
+  end
+  truthy(used <= workspace.state.metrics.inner_width - 1, "the row fits the frame it is drawn in")
+
+  vim.o.columns = 80
+  workspace:reflow()
+  local hint = api.nvim_buf_get_lines(workspace.state.buf.app, workspace:dimensions().hint_row, -1, false)[1] or ""
+  truthy(hint:find("│", 1, true) ~= nil, "and the drawn row shows the separator")
+
+  workspace:close()
+  local_provider:close()
+end)
+
+run_case("the terminal card names the pane mode in both modes", function()
+  local workspace, local_provider = make_workspace()
+  local created = local_provider:create(vim.fn.getcwd())
+  workspace:refresh()
+  workspace:select_item("local:" .. created.id)
+  workspace:set_focus("terminal")
+  truthy(
+    wait_for(1000, function()
+      return api.nvim_win_get_buf(workspace.state.win.terminal) == created.buf
+    end),
+    "the pane shows the session"
+  )
+
+  ---@return { text: string, hl: string? }?
+  local function badge()
+    local placement = workspace.state.app:placement("terminal")
+    for _, span in ipairs(row_spans(workspace, placement.rect.row - 1)) do
+      if span.text:match("^%[") then
+        return span
+      end
+    end
+  end
+
+  eq((badge() or {}).text, "[insert]", "typing mode is named on the card")
+  eq((badge() or {}).hl, "CinderUiTag", "and wears a highlight group of its own")
+
+  local real_mode = api.nvim_get_mode
+  api.nvim_get_mode = function()
+    return { mode = "nt" }
+  end
+  pcall(api.nvim_exec_autocmds, "ModeChanged", {})
+  api.nvim_get_mode = real_mode
+
+  eq((badge() or {}).text, "[normal]", "normal mode is named too")
+
+  workspace:set_focus("items")
+  eq((badge() or {}).text, "[normal]", "and stays named while another panel has the keyboard")
+
+  workspace:close()
+  local_provider:close()
+end)
+
+run_case("the terminal card wears no mode badge without a terminal", function()
+  local workspace = stub_workspace({ stub_provider({ stub_container("stub:1", "one") }) })
+  workspace:open()
+  workspace:refresh()
+
+  truthy(
+    wait_for(1000, function()
+      return api.nvim_win_get_buf(workspace.state.win.terminal) ~= nil
+    end),
+    "the placeholder reached the pane"
+  )
+  local placement = workspace.state.app:placement("terminal")
+  for _, span in ipairs(row_spans(workspace, placement.rect.row - 1)) do
+    eq(span.text:match("^%["), nil, "a pane without a job has no mode to name")
+  end
+
+  workspace:close()
+end)
+
+run_case("the layout never overflows a narrow editor", function()
+  for _, size in ipairs({ { columns = 40, lines = 12 }, { columns = 24, lines = 8 }, { columns = 120, lines = 30 } }) do
+    local d = layout.compute({
+      columns = size.columns,
+      lines = size.lines,
+      cmdheight = 1,
+      width = 0.88,
+      height = 0.86,
+      left_ratio = 0.3,
+      container_rows = 3,
+    })
+    truthy(d.frame.width <= size.columns - 2, "the frame is at most as wide as the editor")
+    truthy(d.frame.col + d.frame.width <= size.columns - 2, "and never starts past its edge")
+    truthy(d.frame.height <= size.lines - 1, "it is at most as tall as the editor")
+    truthy(d.frame.row + d.frame.height <= size.lines - 1, "and never starts below its edge")
+    truthy(d.sidebar_width >= 0 and d.terminal_width >= 0, "no card gets a negative width")
+    eq(d.sidebar_width + d.terminal_width, d.inner_width, "the two columns still tile the frame")
+  end
+end)
+
+run_case("the workspace float paints its background with `sidebar`", function()
+  local workspace, local_provider = make_workspace()
+
+  -- cinder-ui draws its floats with `NormalFloat`; the workspace retargets the
+  -- cell groups to its own documented `sidebar` group, and leaves the border
+  -- and title to cinder-ui's `CinderUiBorder`/`CinderUiTitle`.
+  local value = api.nvim_get_option_value("winhighlight", { win = workspace.state.win.app })
+  truthy(
+    value:find("Normal:" .. workspace:highlights().sidebar, 1, true) ~= nil,
+    "the float background is the terminal's own group"
+  )
+  truthy(
+    value:find("EndOfBuffer:" .. workspace:highlights().sidebar, 1, true) ~= nil,
+    "and so is the area past the last line"
+  )
+  eq(value:find("FloatBorder", 1, true), nil, "the border group belongs to cinder-ui")
+  eq(value:find("FloatTitle", 1, true), nil, "and so does the title group")
+
+  workspace:close()
+  local_provider:close()
+end)
+
+---Display columns `[from, from + width)` of one canvas row. A char-based slice
+---would run past the card's border as soon as a wide glyph is in it.
+---@param text string
+---@param from number 0-based display column
+---@param width number
+---@return string
+local function display_slice(text, from, width)
+  local out, col = {}, 0
+  for index = 0, vim.fn.strchars(text) - 1 do
+    local char = vim.fn.strcharpart(text, index, 1)
+    local char_width = vim.fn.strdisplaywidth(char)
+    if col >= from and col + char_width <= from + width then
+      out[#out + 1] = char
+    end
+    col = col + char_width
+  end
+  return table.concat(out)
+end
+
+run_case("a truncated label keeps whole glyphs inside the row width", function()
+  local label = string.rep("漢", 12)
+  local container = stub_container("stub:1", label)
+  container.detail = nil
+  local workspace = stub_workspace({ stub_provider({ container }) })
+  workspace:open()
+  workspace:refresh()
+
+  -- The row is drawn as `│` plus the two-cell mark column plus the label, so
+  -- the label is what sits between the mark and the card's right border.
+  local placement = workspace.state.app:placement("containers")
+  local row = api.nvim_buf_get_lines(workspace.state.buf.app, placement.inner.row - 1, placement.inner.row, false)[1]
+  local region = display_slice(row, placement.inner.col - 1, placement.inner.width):gsub("%s+$", "")
+  local text = vim.fn.strcharpart(region, 2)
+  eq(vim.fn.strcharpart(text, vim.fn.strchars(text) - 1, 1), "…", "the cut is marked with one ellipsis")
+  local kept = vim.fn.strcharpart(text, 0, vim.fn.strchars(text) - 1)
+  truthy(vim.fn.strdisplaywidth(kept) <= workspace:row_text_width(), "the label fits the row in columns")
+  eq(kept, vim.fn.strcharpart(label, 0, vim.fn.strchars(kept)), "and never ends on half a glyph")
+
+  workspace:close()
+end)
+
+---A fake `tmux` binary: the provider is driven end to end without a live tmux
+---server anywhere near the user's real one. `list-clients` answers instantly -
+---the provider waits for it before it reports - and every other call is the
+---embedded client, which is what `body` stands in for.
+---@param body string[] Shell lines the fake runs for the client job.
+---@return string path
+local function fake_tmux(body)
+  local path = vim.fn.tempname()
+  local lines = {
+    "#!/bin/sh",
+    'for arg in "$@"; do',
+    '  case "$arg" in',
+    "    list-clients) exit 0 ;;",
+    "  esac",
+    "done",
+  }
+  vim.list_extend(lines, body)
+  vim.fn.writefile(lines, path)
+  vim.fn.setfperm(path, "rwxr-xr-x")
+  return path
+end
+
+---@return table provider, table node
+local function tmux_provider(binary)
+  local TmuxProvider = require("cinder_terminal.providers.tmux")
+  local provider = TmuxProvider.new({ tmux_binary = binary })
+  local node = {
+    id = "tmux:@1",
+    kind = "terminal",
+    provider = "tmux",
+    label = "1 shell",
+    session_id = "fake",
+    window_id = "@1",
+  }
+  provider.terminals[node.id] = node
+  return provider, node
+end
+
+run_case("the embedded tmux client still attaches through its own buffer", function()
+  local provider, node = tmux_provider(fake_tmux({ "sleep 5" }))
+  local seen
+  provider:show(node, function(ok, buf, error)
+    seen = { ok = ok, buf = buf, error = error }
+  end)
+  truthy(
+    wait_for(3000, function()
+      return seen ~= nil
+    end),
+    "the attach answered"
+  )
+
+  eq(seen.ok, true, "the client attached")
+  truthy(seen.buf ~= nil, "with the buffer it was started in")
+  eq(vim.bo[seen.buf].buftype, "terminal", "the buffer really owns the job")
+  truthy((vim.bo[seen.buf].channel or 0) > 0, "with a channel behind it")
+  truthy(vim.fn.jobpid(provider.client.job or 0) > 0, "and a live process")
+
+  provider:close()
+end)
+
+run_case("the tmux client keeps quiet while it backs off, and reports the first failure", function()
+  local provider, node = tmux_provider(fake_tmux({ "exit 1" }))
+  local latest
+  local function restart()
+    latest = nil
+    provider:restart(node.session_id, node.window_id, function(ok, _, error)
+      latest = { ok = ok, error = error }
+    end)
+    truthy(
+      wait_for(3000, function()
+        return latest ~= nil
+      end),
+      "the attempt answered"
+    )
+    return latest
+  end
+
+  for attempt = 1, 3 do
+    eq(restart().ok, true, "attempt " .. attempt .. " started a client")
+    truthy(
+      wait_for(3000, function()
+        return (provider.client.failures or 0) >= attempt
+      end),
+      "attempt " .. attempt .. " died and was counted"
+    )
+  end
+  truthy(provider.client.retry_at > 0, "three quick deaths put the provider in backoff")
+  truthy(provider:attach_error() ~= nil, "and the failure it does report names itself")
+
+  local during_backoff = restart()
+  eq(during_backoff.ok, false, "the next attempt inside the window starts nothing")
+  eq(providers.is_silent(during_backoff.error), true, "and says nothing at all")
+
+  provider:close()
+end)
+
 local function main()
   print(("%d passed, %d failed"):format(passed, failed))
   if failed > 0 then

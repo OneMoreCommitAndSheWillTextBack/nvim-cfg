@@ -1,7 +1,6 @@
+-- 只覆盖 dashboard 的 header；priority/lazy 由 LazyVim 的 snacks spec 提供。
 return {
   "folke/snacks.nvim",
-  priority = 1000,
-  lazy = false,
   opts = {
     dashboard = {
       enabled = true,

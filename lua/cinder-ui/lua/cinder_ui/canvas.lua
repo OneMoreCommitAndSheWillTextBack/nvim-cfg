@@ -56,6 +56,22 @@ function M.truncate(s, max_width)
   return table.concat(out)
 end
 
+---Truncate to at most `max_width` display columns and mark the cut with a single
+---`…`, which is part of that budget. Returns `s` unchanged when it fits.
+function M.elide(s, max_width)
+  if s == nil or s == "" or max_width <= 0 then
+    return ""
+  end
+  if M.width(s) <= max_width then
+    return s
+  end
+  local dots = "…"
+  if max_width < M.width(dots) then
+    return M.truncate(s, max_width)
+  end
+  return M.truncate(s, max_width - M.width(dots)) .. dots
+end
+
 local function row_of(self, row)
   local r = self.cells[row]
   if not r then
@@ -110,14 +126,24 @@ function Canvas:put_char(row, col, ch, hl)
   end
 end
 
+-- Writes at most `max_width` display columns of `text` (default: up to the edge
+-- of the canvas) and returns the display width actually written. Text that does
+-- not fit is cut on a display-column boundary and marked with one `…`, so a wide
+-- glyph is never split and the cut is never taken for a full row.
 function Canvas:put_text(row, col, text, hl, max_width)
   if text == nil or text == "" then
-    return
+    return 0
   end
   text = text:gsub("[\r\n]+", " ")
   local limit = self.width
   if max_width ~= nil and col + max_width - 1 < limit then
     limit = col + max_width - 1
+  end
+  if col > limit then
+    return 0
+  end
+  if M.width(text) > limit - col + 1 then
+    text = M.elide(text, limit - col + 1)
   end
   local c = col
   for _, ch in ipairs(M.chars(text)) do
@@ -130,6 +156,7 @@ function Canvas:put_text(row, col, text, hl, max_width)
       c = c + w
     end
   end
+  return c - col
 end
 
 -- value: string, a single segment { text = "...", hl = "..." },
@@ -160,8 +187,7 @@ function Canvas:put_rich(row, col, value, max_width, transform)
     if transform then
       hl = transform(hl, seg)
     end
-    self:put_text(row, c, text, hl, limit - c + 1)
-    c = c + M.width(text)
+    c = c + self:put_text(row, c, text, hl, limit - c + 1)
   end
   return c - col
 end
@@ -223,7 +249,10 @@ function Canvas:box(r, o)
     local col = r.col + 2
     local stop = r.col + r.width - 2
     if o.tag ~= nil then
-      local tag = "[" .. tostring(o.tag) .. "]"
+      -- a tag that does not fit is truncated like the title: it must never
+      -- write over the top-right corner of the frame
+      local avail = stop - col + 1
+      local tag = M.truncate("[" .. tostring(o.tag) .. "]", math.max(0, avail - 1))
       self:put_text(r.row, col, tag, o.tag_hl or hl)
       col = col + M.width(tag)
       if col <= stop then

@@ -107,8 +107,12 @@ end
 
 ---Card groups cinder-ui draws with, derived from the semantic groups above so
 ---the cards wear the colorscheme instead of a palette of their own. cinder-ui
----derives a per-row variant from `CinderUiCursor`, hence the background.
+---derives a per-row variant from `CinderUiCursor`, hence the background, and
+---picks `CinderUiTitleInactive`/`CinderUiCursorInactive` for a card that does
+---not have the keyboard: without them the sidebar loses its title weight and
+---its cursor row the moment the pane takes over.
 local function apply_card_theme()
+  local theme = require("cinder_ui.theme")
   local border = resolved(M.groups.border)
   local title = resolved(M.groups.title)
   local cursor = resolved(M.groups.selected)
@@ -120,17 +124,22 @@ local function apply_card_theme()
     title.fg and { fg = title.fg, bold = title.bold } or { link = M.groups.title }
   )
   vim.api.nvim_set_hl(0, "CinderUiTitle", { link = M.groups.title })
+  vim.api.nvim_set_hl(0, theme.title_inactive, { link = M.groups.title_inactive })
   vim.api.nvim_set_hl(0, "CinderUiTag", { link = M.groups.mark })
   vim.api.nvim_set_hl(0, "CinderUiDim", { link = M.groups.detail })
   vim.api.nvim_set_hl(0, "CinderUiScrollbar", { link = M.groups.title })
   vim.api.nvim_set_hl(0, "CinderUiCursor", cursor.bg and { bg = cursor.bg } or { link = M.groups.selected })
+  -- The unfocused cursor row follows `selected_inactive`. A link is enough -
+  -- cinder-ui resolves the background through it and draws no bar at all when
+  -- the colorscheme has none to fade.
+  vim.api.nvim_set_hl(0, theme.cursor_inactive, { link = M.groups.selected_inactive })
 
   -- cinder-ui caches the highlight variants it derives per row; a new
   -- colorscheme has to drop them or the selection bar keeps the old colors.
   -- `setup()` only applies defaults, so the groups set just above survive.
   -- cinder-ui is a declared dependency, so a missing one must fail loudly
   -- instead of leaving the cards with the wrong colors forever.
-  require("cinder_ui.theme").setup()
+  theme.setup()
 end
 
 --- Rebuild the CinderTerminal highlight layer for the active colorscheme.

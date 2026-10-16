@@ -126,7 +126,7 @@ buffer 被删除」的窗口 —— 所以 kill/restart 当前显示的终端时
 
 `WinClosed` 兜底：工作区的两个窗口之一（app 浮窗或终端窗口）意外消失
 （`:q`、`:bd`、外部关闭）时隐藏整个工作区，而不是留下半死状态。tmux client 每次 attach 都换一个新 buffer
-（`termopen` 拒绝复用 `buftype=terminal` 的 buffer），旧的在没人显示后由
+（终端 job 拒绝复用 `buftype=terminal` 的 buffer），旧的在没人显示后由
 `snapshot` 的 sweep 回收。
 
 ### 6.2 tmux client 失败退避
@@ -137,13 +137,14 @@ attach 立刻失败（socket 不对、server 没了）时，client 会在
 - socket 从 `$TMUX` 继承，和其余命令保持一致（`attach-session` 之前会
   `env -u TMUX`，所以必须显式传 `-S`）；
 - 连续 3 次「启动后很快退出」进入退避（2s、4s……上限 30s），退避期间
-  `cb(false, nil, nil)` 静默失败、不再刷错误；
+  `cb(false, nil, providers.SILENT)`：调用方收到「这条结果不用报」，横幅和
+  占位文本都不刷新，右栏继续显示最后一次输出；
 - 存活超过 1.5s 的 client 视为健康，清零计数；
 - 用户按 `R` 时 UI 传 `opts.force`，provider 清零计数并立即重试。
 
 ### 6.3 `on_exit` 的第三个参数形状不固定
 
-同一个 `termopen` 回调，Neovim 可能传**输出行数组**，也可能只传字符串
+同一个终端 job 回调（`jobstart(..., { term = true })`），Neovim 可能传**输出行数组**，也可能只传字符串
 `"exit"`。内部 kill 掉被 attach 的 tmux 会话时恰好是后者：
 `table.concat("exit", " ")` 直接抛错，错误发生在 job 回调里，Neovim 停在
 `Press ENTER` 提示上 —— 表面症状是「界面卡住、右栏和列表都停在旧数据、
@@ -271,4 +272,4 @@ CinderTerminal.Help / Mark / Detail / Error
   加回，不影响现在的面板结构。
 - **UI 依赖只有同仓库的 cinder-ui**：浮窗、边框、标题、列表和 hint 行都由
   `lua/cinder-ui` 的卡片库画进一个 app buffer；终端本身仍然是原生
-  `termopen`/`nvim_open_win` 窗口，没有被重绘。
+  `jobstart({ term = true })`/`nvim_open_win` 窗口，没有被重绘。

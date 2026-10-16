@@ -84,6 +84,11 @@ The module functions are:
 On failure, operations return nil, err, where err is an actionable string.
 The core module does not call |vim.notify()|; command and UI entry points do.
 
+`new(name)` and `import(path)` never overwrite: if an object with that name
+already exists under CINDER_WORKSPACE (a valid workspace, a foreign directory or
+a plain file), they fail without touching it. To reopen an existing workspace use
+`open(root)`; to rebuild one, remove it by hand first.
+
 ==============================================================================
 4. Explorer integration                                   *cinder-workspace-explorer*
 

@@ -30,11 +30,12 @@ require("lazy").setup({
     version = false, -- always use the latest git commit
     -- version = "*", -- try installing the latest stable version for plugins that support semver
   },
-  git = { timeout = 100000 },
-  install = { colorscheme = { "tokyonight", "habamax" } },
+  -- git.timeout 保持默认（秒，120 = 2 分钟）。写成 100000 等于 27 小时不杀进程，
+  -- 挂住的 clone/fetch 会安静卡死；真要调大用 300~600。
+  install = { colorscheme = { "everforest", "habamax" } },
   checker = {
     enabled = true, -- check for plugin updates periodically
-    notify = false, -- notify on update
+    notify = true, -- 有更新时通知（false 会直接静默自动更新）
   }, -- automatically check for plugin updates
   performance = {
     rtp = {

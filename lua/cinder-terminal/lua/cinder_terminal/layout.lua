@@ -16,15 +16,15 @@
 ---@field items_rows number Height of the items card.
 local M = {}
 
+---Hold `value` between `min` and `max`. When the editor is too small for `min`
+---the two disagree, and then `max` - the bound the editor dictates - wins:
+---returning the minimum would put a card off the screen.
 ---@param value number
 ---@param min number
 ---@param max number
 ---@return number
 local function clamp(value, min, max)
-  if max < min then
-    return min
-  end
-  return math.max(min, math.min(max, value))
+  return math.max(math.min(min, max), math.min(value, max))
 end
 
 ---@class CinderTerminal.Layout.Context
@@ -50,15 +50,23 @@ local MIN_ITEM_ROWS = 4
 ---@param ctx CinderTerminal.Layout.Context
 ---@return CinderTerminal.Layout
 function M.compute(ctx)
-  local columns = math.max(40, ctx.columns)
-  local lines = math.max(12, ctx.lines - (ctx.cmdheight or 0))
+  -- The editor is the only hard bound: a window too small for the preferred
+  -- minima gets a smaller workspace instead of a frame running off the screen,
+  -- which is why `columns - 2`/`lines - 1` are the ceilings everywhere below.
+  -- The floors only keep the arithmetic on positive numbers in a window that
+  -- cannot exist.
+  local columns = math.max(BORDER + 2, ctx.columns)
+  local lines = math.max(BORDER + HINT_ROWS, ctx.lines - (ctx.cmdheight or 0))
   local width = clamp(math.floor(columns * ctx.width), 60, columns - 2)
   local height = clamp(math.floor(lines * ctx.height), 16, lines - 1)
   local row = math.max(0, math.floor((lines - height - 2) / 2))
   local col = math.max(0, math.floor((columns - width - 2) / 2))
 
   local body_height = math.max(BORDER, height - HINT_ROWS)
-  local sidebar_width = clamp(math.floor(width * ctx.left_ratio), 26, width - 26)
+  -- The sidebar keeps its preferred minimum only while a terminal card can
+  -- still sit next to it in whatever the editor left.
+  local sidebar_max = math.max(1, width - 26)
+  local sidebar_width = clamp(math.floor(width * ctx.left_ratio), 26, sidebar_max)
   local min_items = math.max(2, ctx.min_items or MIN_ITEM_ROWS) + BORDER
   local wanted = math.max(0, ctx.container_rows) + BORDER
   local container_rows = clamp(wanted, BORDER, math.max(BORDER, body_height - min_items))

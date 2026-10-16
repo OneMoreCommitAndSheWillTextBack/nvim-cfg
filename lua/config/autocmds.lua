@@ -1,15 +1,13 @@
--- Autocmds are automatically loaded on the VeryLazy event
--- Default autocmds that are always set: https://github.com/LazyVim/LazyVim/blob/main/lua/lazyvim/config/autocmds.lua
---
--- Add any additional autocmds here
--- with `vim.api.nvim_create_autocmd`
---
--- Or remove existing autocmds by their group name (which is prefixed with `lazyvim_` for the defaults)
--- e.g. vim.api.nvim_del_augroup_by_name("lazyvim_wrap_spell")
-
+-- LazyVim 的 lazyvim_checktime 已经负责 FocusGained / TermClose / TermLeave，
+-- 这里只补「进入缓冲区」与「空闲」两种情形，并加上 nofile 保护，
+-- 避免对 dashboard / lazy / nofile 缓冲做无意义的 checktime。
 local group = vim.api.nvim_create_augroup("auto_read_external_files", { clear = true })
 
-vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold", "CursorHoldI" }, {
+vim.api.nvim_create_autocmd({ "BufEnter", "CursorHold", "CursorHoldI" }, {
   group = group,
-  command = "checktime",
+  callback = function()
+    if vim.o.buftype ~= "nofile" then
+      vim.cmd("checktime")
+    end
+  end,
 })

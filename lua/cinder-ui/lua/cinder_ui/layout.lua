@@ -5,13 +5,22 @@ local geom = require("cinder_ui.geom")
 
 local M = {}
 
+local function bound(v)
+  if type(v) == "number" then
+    return math.floor(v)
+  end
+  return v
+end
+
 local function spec_of(child, axis)
   local v = (axis == "row") and child.width or child.height
   if type(v) == "number" then
     return { kind = "fixed", size = math.max(0, math.floor(v)) }
   end
   if type(v) == "table" and v.__flex then
-    return { kind = "flex", weight = v.weight or 1, min = v.min, max = v.max }
+    -- like fixed sizes, bounds are whole cells: a fractional min/max would
+    -- otherwise put children on rows nothing ever draws to
+    return { kind = "flex", weight = v.weight or 1, min = bound(v.min), max = bound(v.max) }
   end
   return { kind = "flex", weight = 1 }
 end

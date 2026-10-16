@@ -19,14 +19,14 @@ cinder-terminal.nvim owns one floating workspace made of three cards and a
 contextual key hint row:
 
 >
-    ╭─Containers──────────────╮╭─Terminal───────────────────────╮
+    ╭─Containers──────────────╮╭─[insert]─Terminal──────────────╮
     │  local  1 shell         ││                                │
     ╰─────────────────────────╯│                                │
     ╭─local───────────────────╮│                                │
     │1 ~/Code/task/nvim-c...  ││                                │
     │                         ││                                │
     ╰─────────────────────────╯╰────────────────────────────────╯
-     [C-\ / Esc Esc] normal mode  [C-b] items  [C-/] hide
+     [C-\ / Esc Esc] normal mode │ [C-b] items │ [C-/] hide
 <
 
 The containers card lists everything that can hold a terminal, the items card
@@ -41,15 +41,19 @@ The plugin installs no global mappings; every key below is buffer local.
 ==============================================================================
 LAYOUT AND KEYMAPS                                     *cinder-terminal-keys*
 
-The selection lives in one of three cards. `h` and `l` move between them, so
-the active card is always visible instead of being a hidden mode. A list row
-is card data rather than a buffer cursor: `j`/`k`, `gg`/`G` and `<C-d>`/`<C-u>`
-are bound by the plugin and the visible scroll follows the selection.
+The keyboard lives in the sidebar - its items card or its containers card - or
+in the terminal pane. `<Tab>` swaps the pane with the sidebar list, and inside
+the sidebar `h`/`l` walk between the containers card and the items card, so the
+row that owns the keyboard is always visible instead of being a hidden mode. A
+list row is card data rather than a buffer cursor: `j`/`k`, `gg`/`G` and
+`<C-d>`/`<C-u>` are bound by the plugin and the visible scroll follows the
+selection.
 
 Containers card (top left):
     j / k         Move between containers; counts, `gg`/`G` and `<C-d>`/`<C-u>`
                   work. The scroll follows the selection
     l or <CR>     Move into the items card
+    <Tab>         Swap to the terminal pane (`<S-Tab>` does the same)
     n             Create a container; picks from a `vim.ui.select()` menu
     d             Kill the selected container and everything inside it
     r             Rename the selected container
@@ -87,13 +91,14 @@ Terminal card, normal mode:
     <Tab>         Move back to items list (the swap; `q`, `h` and the rest of
                   normal mode stay Neovim's own)
 
-The pane looks the same in both modes, so the terminal card's title gains
-`normal` and the key row switches to the keys that work right now. The row
-never advertises a key that the current mode would swallow: while keys go to
-the job <Tab> completes
-and `?` is typed into the program, so neither is listed there, and in the pane
-`?` stays Neovim's backward search. Press `?` in a list panel to see every
-keymap, including the ones the pane deliberately leaves alone.
+The pane looks the same in both modes, so the terminal card wears a badge
+naming the one the keys go to - `insert` while the job has them, `normal`
+while the pane is Neovim's - and the key row switches to the keys that work
+right now. The row never advertises a key that the current mode would swallow:
+while keys go to the job <Tab> completes and `?` is typed into the program, so
+neither is listed there, and in the pane `?` stays Neovim's backward search.
+Press `?` in a list panel to see every keymap, including the ones the pane
+deliberately leaves alone.
 
 The pane binds a single <Esc>, forwards that byte to the job itself and only
 counts a second press inside `escape_window` as the <Esc><Esc> gesture, so a
@@ -137,6 +142,11 @@ the container is never an empty list waiting for `n`; killing that shell is
 not undone by reopening, and `providers.local.auto_shell = false` turns the
 default off. Hiding the workspace keeps the shells alive; quitting Neovim ends
 them. `r` restarts a session in the same directory.
+
+A shell that cannot be started - a directory that was deleted since the session
+was recorded, or something that is not a directory at all - stays in the list
+as a `failed` row and explains itself in the hint row and in the terminal card.
+The workspace still opens, and `d` removes the row.
 
 tmux ~
 Every tmux session is a container, its windows are items. cinder-terminal
@@ -236,6 +246,11 @@ SETUP                                                  *cinder-terminal-setup*
                         providers.tmux.enabled     default true
                         providers.tmux.tmux_binary default "tmux"
                         providers.tmux.socket_name / socket_path
+    highlights        per-group overrides, applied on every theme refresh:
+                      `highlights = { overrides = { sidebar = { bg = "#343f44" } } }`.
+                      The keys are the public group names of
+                      |cinder-terminal-highlights|; `highlights` itself may
+                      also be that table of overrides.
 
     cwd, root_markers, shell, tmux_binary, socket_name and socket_path are
     also accepted at the top level and used as provider defaults.
@@ -272,7 +287,8 @@ The module returned by `require("cinder_terminal")` exposes:
 
                                                             *cinder_terminal.copy_current()*
     Create another local session using the process directory of the selected
-    one.
+    one. A selection that belongs to another provider is left alone, the way
+    `restart_current` leaves it.
 
                                                             *cinder_terminal.close_workspace()*
     Hide the workspace while keeping every session alive.

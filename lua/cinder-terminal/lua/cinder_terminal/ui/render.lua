@@ -2,12 +2,33 @@
 ---rows, the card titles, the hint row and the card tree handed to the app.
 local ui = require("cinder_ui")
 local util = require("cinder_terminal.ui.util")
+local providers = require("cinder_terminal.providers")
 
 local CARD_BORDER = util.CARD_BORDER
 local fn = vim.fn
 
 ---@class CinderTerminal.UI
 local M = {}
+
+---Cut `text` to at most `width` display columns, marking the cut with one `…`
+---that is part of the budget. Counting characters instead would split a CJK or
+---emoji glyph in half and cost columns the row does not have.
+---@param text string
+---@param width number
+---@return string
+local function truncate(text, width)
+  local chars = fn.strchars(text)
+  local cut, used = 0, 0
+  while cut < chars do
+    local next_width = fn.strdisplaywidth(fn.strcharpart(text, cut, 1))
+    if used + next_width > width - 1 then
+      break
+    end
+    used = used + next_width
+    cut = cut + 1
+  end
+  return fn.strcharpart(text, 0, cut) .. "…"
+end
 
 ---@param text string
 ---@param width number
@@ -17,10 +38,7 @@ local function display_text(text, width)
   if width <= 0 or fn.strdisplaywidth(text) <= width then
     return text
   end
-  if width <= 3 then
-    return fn.strcharpart(text, 0, width)
-  end
-  return fn.strcharpart(text, 0, width - 3) .. "..."
+  return truncate(text, width)
 end
 
 ---@param node CinderTerminal.Node
@@ -45,16 +63,30 @@ function M:items_title()
   return (container and container.label) or "Terminals"
 end
 
+---Badge of the terminal card: the pane looks the same in both modes, so the
+---card has to say which one the keys go to. It is a card tag rather than part
+---of the title so it keeps a highlight group of its own, and it exists only
+---while the pane really holds a terminal.
+---@return string?
+function M:terminal_mode()
+  local state = self.state
+  local win = state.win.terminal
+  if not util.valid_win(win) or vim.bo[vim.api.nvim_win_get_buf(win)].buftype ~= "terminal" then
+    return nil
+  end
+  return self:pane_normal_mode() and "normal" or "insert"
+end
+
 ---@return string
 function M:terminal_title()
   local state = self.state
   local label = state.terminal_title ~= "" and state.terminal_title or "Terminal"
-  local marker = self:pane_normal_mode() and "  ·  normal" or ""
-  -- The card spends one cell per border and two more before the title, so a
-  -- long terminal name must be cut here: otherwise the marker is clipped away
-  -- and the pane silently stops saying which mode it is in.
-  local budget = (state.metrics and state.metrics.terminal_width or 60) - 4
-  return display_text(label, math.max(1, budget - #marker)) .. marker
+  -- The card spends one cell per border and two more before the title, and the
+  -- mode badge sits in front of it: the label gives up its width so a long
+  -- terminal name never costs the badge.
+  local mode = self:terminal_mode()
+  local budget = (state.metrics and state.metrics.terminal_width or 60) - 4 - (mode and (#mode + 3) or 0)
+  return display_text(label, math.max(1, budget))
 end
 
 ---Text budget of a row: the card content minus the mark/digit column and the
@@ -135,7 +167,12 @@ function M:items_data()
 end
 
 ---The hint row, straight out of `interaction`; a pending message wins.
----@return { text: string, hl: string }[]
+---
+---One segment per entry instead of one flat line: the key reads as a key, its
+---description as prose, and a dim `│` separates entries. Widening is handled by
+---dropping trailing entries whole, because a hint cut mid-word reads as a key
+---that does not exist.
+---@return { text: string, hl: string? }[]
 function M:hint_line()
   local state = self.state
   local hl = self:highlights()
@@ -144,11 +181,22 @@ function M:hint_line()
     local group = state.message_level == "error" and hl.error or hl.help
     return { { text = " " .. display_text(state.message, width), hl = group } }
   end
-  local parts = {}
-  for _, entry in ipairs(self:context_keys()) do
-    parts[#parts + 1] = "[" .. entry.key .. "] " .. entry.desc
+  local segments, used = { { text = " " } }, 1
+  for index, entry in ipairs(self:context_keys()) do
+    local key = "[" .. entry.key .. "] "
+    local separator = index > 1 and " │ " or ""
+    local entry_width = fn.strdisplaywidth(separator .. key .. entry.desc)
+    if used + entry_width > width then
+      break
+    end
+    used = used + entry_width
+    if separator ~= "" then
+      segments[#segments + 1] = { text = separator, hl = hl.detail }
+    end
+    segments[#segments + 1] = { text = key, hl = hl.title }
+    segments[#segments + 1] = { text = entry.desc, hl = hl.help }
   end
-  return { { text = display_text(" " .. table.concat(parts, "  ") .. " ", width), hl = hl.help } }
+  return segments
 end
 
 ---The card tree of the workspace: the sidebar column (containers over items),
@@ -196,6 +244,7 @@ function M:build_tree()
           ui.card({
             id = "terminal",
             title = self:terminal_title(),
+            tag = self:terminal_mode(),
             width = ui.flex(1, { min = 25 }),
             body = ui.text({
               get = function()
@@ -253,10 +302,15 @@ end
 
 ---Report a failed provider call in the hint row. Providers are allowed to
 ---fail without a message, but not to fail silently: the caller knows what it
----asked for, so it names the action.
----@param error? string
+---asked for, so it names the action. `SILENT` is the one exception - the user
+---dismissed a prompt or the provider is retrying on its own - and it never
+---reaches the row.
+---@param error? CinderTerminal.Silent|string
 ---@param fallback string
 function M:notify_failure(error, fallback)
+  if providers.is_silent(error) then
+    return
+  end
   self:notify(error or fallback, "error")
 end
 
